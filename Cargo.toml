@@ -1,0 +1,29 @@
+[package]
+name = "cooktop"
+version = "0.0.0"
+authors = ["Josh Mitchell <yoshanuikabundi@gmail.com>"]
+edition = "2018"
+description = "Convert MD topologies between formats"
+readme = "README.md"
+repository = "https://github.com/Yoshanuikabundi/cooktop"
+keywords = ["molecular-dynamics"]
+categories = ["science"]
+license = "MIT"
+
+exclude = [
+    "cooktop.sublime-project",
+    "cooktop.sublime-workspace"
+]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+nom = "6"
+itertools = "0.9"
+
+
+[badges]
+travis-ci = { repository = "yoshanuikabundi/cooktop", branch = "main" }
+
+[package.metadata.release]
+pre-release-hook = ["cargo", "readme", ">README.md"]
