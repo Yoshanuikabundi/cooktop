@@ -33,6 +33,117 @@ impl Into<bool> for YesOrNo {
     }
 }
 
+/// A pair of atom types whose order doesn't matter
+#[derive(Debug, Clone)]
+struct AtomPair(String, String);
+impl PartialEq for AtomPair {
+    fn eq(&self, other: &Self) -> bool {
+        (self.0 == other.0 && self.1 == other.1) || (self.0 == other.1 && self.0 == other.1)
+    }
+}
+impl From<(&str, &str)> for AtomPair {
+    fn from(value: (&str, &str)) -> Self {
+        AtomPair(value.0.into(), value.1.into())
+    }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+enum BondParams {
+    HarmBond {
+        b_0: f64,
+        k_b: f64,
+    },
+    G96Bond {
+        b_0: f64,
+        k_b: f64,
+    },
+    MorseBond {
+        b_0: f64,
+        d: f64,
+        beta: f64,
+    },
+    CubicBond {
+        b_0: f64,
+        c_i23: f64,
+    },
+    Connection,
+    HarmPot {
+        b_0: f64,
+        k_b: f64,
+    },
+    FeneBond {
+        b_m: f64,
+        k_b: f64,
+    },
+    TabBond {
+        tab_n: usize,
+        k: f64,
+    },
+    TabPot {
+        tab_n: usize,
+        k: f64,
+    },
+    RestrPot {
+        low: f64,
+        up_1: f64,
+        up_2: f64,
+        k_dr: f64,
+    },
+}
+impl FromStr for BondParams {
+    type Err = &'static str;
+
+    #[allow(unreachable_code)]
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let func = todo!();
+        use BondParams::*;
+        let params = match func {
+            "1" => HarmBond {
+                b_0: todo!(),
+                k_b: todo!(),
+            },
+            "2" => G96Bond {
+                b_0: todo!(),
+                k_b: todo!(),
+            },
+            "3" => MorseBond {
+                b_0: todo!(),
+                d: todo!(),
+                beta: todo!(),
+            },
+            "4" => CubicBond {
+                b_0: todo!(),
+                c_i23: todo!(),
+            },
+            "5" => Connection,
+            "6" => HarmPot {
+                b_0: todo!(),
+                k_b: todo!(),
+            },
+            "7" => FeneBond {
+                b_m: todo!(),
+                k_b: todo!(),
+            },
+            "8" => TabBond {
+                tab_n: todo!(),
+                k: todo!(),
+            },
+            "9" => TabPot {
+                tab_n: todo!(),
+                k: todo!(),
+            },
+            "10" => RestrPot {
+                low: todo!(),
+                up_1: todo!(),
+                up_2: todo!(),
+                k_dr: todo!(),
+            },
+            _ => return Err(todo!()),
+        };
+        Ok(params)
+    }
+}
+
 pub fn data_line<'i, A, B, C, D, E, F, G, H, Er>(
     input: &'i str,
 ) -> IResult<&'i str, (A, B, C, D, E, F, G, H), Er>
@@ -75,10 +186,43 @@ where
     )(input)
 }
 
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub struct ParsePtypeError;
+impl std::fmt::Display for ParsePtypeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "String was not A, S, V or D")
+    }
+}
+impl std::error::Error for ParsePtypeError {}
+
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum ParticleType {
+    /// A regular atom
+    Atom,
+    /// A shell for polarizable models, currently unused in GROMACS
+    Shell,
+    /// A virtual site, whose position is constructed from other atoms
+    VirtualSite,
+}
+
+impl FromStr for ParticleType {
+    type Err = ParsePtypeError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "A" => Ok(Self::Atom),
+            "S" => Ok(Self::Shell),
+            "V" | "D" => Ok(Self::VirtualSite),
+            _ => Err(ParsePtypeError),
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub enum Directive {
     Defaults(Defaults),
     Atomtypes(Atomtypes),
+    Bondtypes(Bondtypes),
 }
 
 impl From<Defaults> for Directive {
@@ -93,11 +237,18 @@ impl From<Atomtypes> for Directive {
     }
 }
 
+impl From<Bondtypes> for Directive {
+    fn from(value: Bondtypes) -> Self {
+        Self::Bondtypes(value)
+    }
+}
+
 impl Directive {
     fn parse(input: &str) -> IResult<&str, Self> {
         alt((
             map(Defaults::parse, Self::from),
             map(Atomtypes::parse, Self::from),
+            map(Bondtypes::parse, Self::from),
         ))(input)
     }
 
@@ -118,6 +269,42 @@ impl Directive {
                 |s: &str| equals_lowercase(s, name),
             ),
         )(input)
+    }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct Bondtypes {
+    pairs: Vec<AtomPair>,
+    params: Vec<BondParams>,
+}
+
+impl Bondtypes {
+    fn parse(input: &str) -> IResult<&str, Self> {
+        let (input, _) = Directive::parse_header(input, "bondtypes")?;
+
+        let mut out = Self {
+            pairs: Vec::new(),
+            params: Vec::new(),
+        };
+
+        let (rest, _) = many1_count(map(
+            data_line,
+            |(atom1, atom2, params, _, _, _, _, _): (
+                String,
+                String,
+                BondParams,
+                NoField,
+                NoField,
+                NoField,
+                NoField,
+                NoField,
+            )| {
+                out.pairs.push(AtomPair(atom1, atom2));
+                out.params.push(params);
+            },
+        ))(input)?;
+
+        Ok((rest, out))
     }
 }
 
@@ -200,38 +387,6 @@ impl Defaults {
     }
 }
 
-#[derive(Debug, PartialEq, Clone, Copy)]
-pub struct ParsePtypeError;
-impl std::fmt::Display for ParsePtypeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "String was not A, S, V or D")
-    }
-}
-impl std::error::Error for ParsePtypeError {}
-
-#[derive(Debug, PartialEq, Clone, Copy)]
-pub enum ParticleType {
-    /// A regular atom
-    Atom,
-    /// A shell for polarizable models, currently unused in GROMACS
-    Shell,
-    /// A virtual site, whose position is constructed from other atoms
-    VirtualSite,
-}
-
-impl FromStr for ParticleType {
-    type Err = ParsePtypeError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "A" => Ok(Self::Atom),
-            "S" => Ok(Self::Shell),
-            "V" | "D" => Ok(Self::VirtualSite),
-            _ => Err(ParsePtypeError),
-        }
-    }
-}
-
 #[derive(Debug, PartialEq, Clone)]
 pub struct Topology(Vec<Directive>);
 
@@ -310,44 +465,39 @@ mod tests {
             C            6      12.01    0.0000  A   3.39967e-01  3.59824e-01
             CA           6      12.01    0.0000  A   3.39967e-01  3.59824e-01
             F            9      19.00    0.0000  A   3.11815e-01  2.55224e-01
-            H            1       1.008   0.0000  A   1.06908e-01  6.56888e-02
+            HA           1       1.008   0.0000  A   2.59964e-01  6.27600e-02
             Cl          17      35.45    0.0000  A   4.40104e-01  4.18400e-01
             Na          11      22.99    0.0000  A   3.32840e-01  1.15897e-02
+
+            [ bondtypes ]
+             Br  CA      1    0.18900  143929.6  ; Amber99Sb-disp
+             C   C       1    0.15250  259408.0  ; Amber99Sb-disp
+             C   CA      1    0.14090  392459.2  ; Amber99Sb-disp
+             F   CA      1    0.13590  323004.8  ; Amber99Sb-disp
+             CA  HA      1    0.10800  307105.6  ; Amber99Sb-disp
+             Cl  CA      1    0.17270  161502.4  ; Amber99Sb-disp
 
 
         ";
 
         let output = Topology::parse(input)?;
 
-        assert_eq!(
-            output,
-            Topology(vec![
-                Directive::Defaults(Defaults {
-                    nb_func: 1,
-                    combo_rule: 2,
-                    generate_pairs: true,
-                    fudge_lj: 0.5,
-                    fudge_qq: 0.8333
-                }),
-                Directive::Atomtypes(Atomtypes {
-                    names: vec![
-                        "Br".into(),
-                        "C".into(),
-                        "CA".into(),
-                        "F".into(),
-                        "H".into(),
-                        "Cl".into(),
-                        "Na".into()
-                    ],
-                    atomic_numbers: vec![35, 6, 6, 9, 1, 17, 11],
-                    masses: vec![79.9, 12.01, 12.01, 19.0, 1.008, 35.45, 22.99],
-                    charges: vec![0.0; 7],
-                    particle_types: vec![ParticleType::Atom; 7],
-                    lj_vs: vec![0.0, 0.339967, 0.339967, 0.311815, 0.106908, 0.440104, 0.332840],
-                    lj_ws: vec![0.0, 0.359824, 0.359824, 0.255224, 0.0656888, 0.418400, 0.0115897]
-                })
-            ])
-        );
+        let mut directives = output.0.iter();
+
+        if let Some(Directive::Defaults(_)) = directives.next() {
+        } else {
+            panic!("Defaults directive missed")
+        };
+
+        if let Some(Directive::Atomtypes(_)) = directives.next() {
+        } else {
+            panic!("Atomtypes directive missed")
+        };
+
+        if let Some(Directive::Bondtypes(_)) = directives.next() {
+        } else {
+            panic!("Bondtypes directive missed")
+        };
 
         Ok(())
     }
@@ -420,6 +570,61 @@ mod tests {
         assert_eq!(output.particle_types, expected.particle_types);
         assert_eq!(output.lj_vs, expected.lj_vs);
         assert_eq!(output.lj_ws, expected.lj_ws);
+        assert_eq!(output, expected);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_bondtypes() -> Result<(), Box<dyn std::error::Error>> {
+        let input = "\
+            [ bondtypes ]
+             Br  CA      1    0.18900  143929.6  ; Amber99Sb-disp
+             C   C       1    0.15250  259408.0  ; Amber99Sb-disp
+             C   CA      1    0.14090  392459.2  ; Amber99Sb-disp
+             F   CA      1    0.13590  323004.8  ; Amber99Sb-disp
+             CA  HA      1    0.10800  307105.6  ; Amber99Sb-disp
+             Cl  CA      1    0.17270  161502.4  ; Amber99Sb-disp\
+        ";
+
+        let (_, output) = Bondtypes::parse(input)?;
+
+        let expected = Bondtypes {
+            pairs: vec![
+                ("Br", "CA").into(),
+                ("C", "C").into(),
+                ("CA", "C").into(),
+                ("F", "CA").into(),
+                ("HA", "CA").into(),
+                ("Cl", "CA").into(),
+            ],
+            params: vec![
+                BondParams::HarmBond {
+                    b_0: 0.18900,
+                    k_b: 143929.6,
+                },
+                BondParams::HarmBond {
+                    b_0: 0.15250,
+                    k_b: 259408.0,
+                },
+                BondParams::HarmBond {
+                    b_0: 0.14090,
+                    k_b: 392459.2,
+                },
+                BondParams::HarmBond {
+                    b_0: 0.13590,
+                    k_b: 323004.8,
+                },
+                BondParams::HarmBond {
+                    b_0: 0.10800,
+                    k_b: 307105.6,
+                },
+                BondParams::HarmBond {
+                    b_0: 0.17270,
+                    k_b: 161502.4,
+                },
+            ],
+        };
         assert_eq!(output, expected);
 
         Ok(())
