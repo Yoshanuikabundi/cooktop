@@ -12,7 +12,6 @@
 )]
 
 pub mod gromacs;
-mod parser;
 
 #[cfg(test)]
 mod tests {}
