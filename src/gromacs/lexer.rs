@@ -319,7 +319,7 @@ mod tests {
     }
 
     #[test]
-    fn test_expand_macros() {
+    fn test_expand_macros() -> Result<()> {
         let input = "
             #define POSRES position_restraints
             [ POSRES ]
@@ -350,16 +350,22 @@ mod tests {
         let output: Result<Vec<Token<'static>>, _> = GmxLexer::new(input)
             .filter(|r| if let Ok(t) = r { !t.is_macro() } else { true })
             .collect();
+        let output = output?;
         #[rustfmt::skip]
-        let expected = Ok(vec![
+        let expected = vec![
             Token::Directive("position_restraints"),
             Token::DataLine(vec!["0", "10000", "10000", "10000"]),
             Token::DataLine(vec!["1", "10000", "10000", "10000"]),
             Token::DataLine(vec!["2", "10000", "10000", "10000"]),
             Token::DataLine(vec!["3", "5000", "5000", "5000"]),
             Token::DataLine(vec!["4", "10000", "10000", "10000"]),
-        ]);
-        assert_eq!(output, expected);
+        ];
+
+        assert_eq!(output.len(), expected.len());
+        for (o, e) in output.iter().zip(expected.iter()) {
+            assert_eq!(o, e);
+        }
+        Ok(())
     }
 
     #[test]
@@ -404,7 +410,7 @@ mod tests {
     }
 
     #[test]
-    fn test_lex_data() {
+    fn test_lex_data() -> Result<()> {
         let input = "
             Br          35      79.90    0.0000  A   0.00000e+00  0.00000e+00
             C            6      12.01    0.0000  A   3.39967e-01  3.59824e-01
@@ -414,9 +420,10 @@ mod tests {
             Cl          17      35.45    0.0000  A   4.40104e-01  4.18400e-01
             Na          11      22.99    0.0000  A   3.32840e-01  1.15897e-02
         ";
-        let output: Result<Vec<Token<'static>>, _> = GmxLexer::new(input).collect();
+        let output: Result<Vec<Token<'static>>> = GmxLexer::new(input).collect();
+        let output = output?;
         #[rustfmt::skip]
-        let expected = Ok(vec![
+        let expected = vec![
             Token::DataLine(vec!["Br", "35", "79.90", "0.0000", "A", "0.00000e+00", "0.00000e+00"]),
             Token::DataLine(vec![ "C",  "6", "12.01", "0.0000", "A", "3.39967e-01", "3.59824e-01"]),
             Token::DataLine(vec!["CA",  "6", "12.01", "0.0000", "A", "3.39967e-01", "3.59824e-01"]),
@@ -424,8 +431,13 @@ mod tests {
             Token::DataLine(vec!["HA",  "1", "1.008", "0.0000", "A", "2.59964e-01", "6.27600e-02"]),
             Token::DataLine(vec!["Cl", "17", "35.45", "0.0000", "A", "4.40104e-01", "4.18400e-01"]),
             Token::DataLine(vec!["Na", "11", "22.99", "0.0000", "A", "3.32840e-01", "1.15897e-02"]),
-        ]);
-        assert_eq!(output, expected);
+        ];
+
+        assert_eq!(output.len(), expected.len());
+        for (o, e) in output.iter().zip(expected.iter()) {
+            assert_eq!(o, e);
+        }
+        Ok(())
     }
 
     #[test]
