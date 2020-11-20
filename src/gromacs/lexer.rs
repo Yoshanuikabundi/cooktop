@@ -3,7 +3,7 @@ type Result<T, E = &'static str> = std::result::Result<T, E>;
 #[allow(single_use_lifetimes)]
 #[derive(Debug, PartialEq)]
 pub enum Token<'s> {
-    Macro(&'s str),
+    ObjectMacro { name: &'s str, def: &'s str },
     Directive(&'s str),
     DataLine(Vec<&'s str>),
 }
@@ -27,7 +27,7 @@ impl<'s> GmxLexer<'s> {
     fn next_char(&mut self) -> Result<Option<char>> {
         match self.iter.next() {
             Some('\\') => match self.iter.next() {
-                Some('\n') => Ok(Some(' ')), // TODO: Test if treating escaped newline as whitespace is correct
+                Some('\n') => Ok(Some(' ')),
                 Some(_) => Err("Don't know how to interpret escaped character"),
                 None => Err("Unexpected EOF while interpreting escape character"),
             },
@@ -46,9 +46,68 @@ impl<'s> GmxLexer<'s> {
         }
     }
 
+    /// Consume leading whitespace, yield a word, then consume a single whitespace character
+    ///
+    /// Words are composed of any number of non-whitespace characters. EOL or EOF is an error.
+    fn next_word(&mut self) -> Result<&'s str, (&'s str, &'static str)> {
+        let mut word = self.iter.as_str();
+        let mut len = 0;
+
+        loop {
+            match self.next_char().map_err(|e| ("", e))? {
+                None => return Err((&word[0..len], "EOF")),
+                Some('\n') => return Err((&word[0..len], "EOL")),
+                Some(c) if c.is_whitespace() && len == 0 => word = self.iter.as_str(),
+                Some(c) if c.is_whitespace() => break,
+                Some(_) => len += 1,
+            };
+        }
+
+        Ok(&word[0..len])
+    }
+
+    fn lex_define_macro(&mut self) -> <Self as Iterator>::Item {
+        let name = match self.next_word() {
+            Ok(s) if s.contains("(") || s.contains(")") => {
+                return Err("Function-like macros not supported")
+            }
+            Ok(s) => s,
+            Err((s, e)) if e == "EOF" || e == "EOL" => s,
+            Err((_, e)) => return Err(e),
+        };
+
+        let mut def = self.iter.as_str();
+        let mut len = 0;
+        loop {
+            match self.next_char()? {
+                None => break,
+                Some('\n') => break,
+                Some(c) if c.is_whitespace() && len == 0 => def = self.iter.as_str(),
+                Some(_) => len += 1,
+            }
+        }
+
+        Ok(Token::ObjectMacro {
+            name,
+            def: &def[0..len],
+        })
+    }
+
     // Lex a macro
     fn lex_macro(&mut self) -> <Self as Iterator>::Item {
-        todo!("Preprocessor macros are not yet implemented")
+        match self.next_word() {
+            Ok("define") => self.lex_define_macro(),
+            Ok("undef") => Err("#undef macros are unimplemented"),
+            Ok("ifdef") => Err("#ifdef macros are unimplemented"),
+            Ok("if") => Err("#if macros are unimplemented"),
+            Ok("else") => Err("#else macros are unimplemented"),
+            Ok("elif") => Err("#elif macros are unimplemented"),
+            Ok("endif") => Err("#endif macros are unimplemented"),
+            Ok(_) => Err("Unknown macro declaration"),
+            Err((_, "EOF")) => Err("End of file in middle of macro definition"),
+            Err((_, "EOL")) => Err("End of line in middle of macro definition"),
+            Err((_, e)) => Err(e),
+        }
     }
 
     /// Lex a directive
@@ -153,6 +212,46 @@ impl<'s> Iterator for GmxLexer<'s> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_next_word() {
+        let input = "hello there buddy";
+        let mut lexer = GmxLexer::new(input);
+        let mut output = Vec::with_capacity(20);
+        loop {
+            let result = lexer.next_word().clone();
+            output.push(result);
+            if result.map_err(|(_, e)| e) == Err("EOF") {
+                break;
+            }
+        }
+        let expected = vec![Ok("hello"), Ok("there"), Err(("buddy", "EOF"))];
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn test_lex_define() {
+        let input = "#define pos_res_fc 10000";
+        let output: Result<Vec<Token<'static>>, _> = GmxLexer::new(input).collect();
+        let expected = Ok(vec![Token::ObjectMacro {
+            name: "pos_res_fc",
+            def: "10000",
+        }]);
+        assert_eq!(output, expected);
+
+        let input = "#define pos_res_fc() 10000";
+        let output: Result<Vec<Token<'static>>, _> = GmxLexer::new(input).collect();
+        let expected = Err("Function-like macros not supported");
+        assert_eq!(output, expected);
+
+        let input = "#define pos_res_fc  10000 10000    10000 ; this is a comment\n";
+        let output: Result<Vec<Token<'static>>, _> = GmxLexer::new(input).collect();
+        let expected = Ok(vec![Token::ObjectMacro {
+            name: "pos_res_fc",
+            def: "10000 10000    10000 ",
+        }]);
+        assert_eq!(output, expected);
+    }
 
     #[test]
     fn test_lex_comment() {
