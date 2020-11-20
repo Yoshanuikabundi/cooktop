@@ -23,6 +23,11 @@ impl<'s> GmxLexer<'s> {
         }
     }
 
+    fn expand_macros(&self, input: &'s str) -> &'s str {
+        // todo!()
+        input
+    }
+
     /// Give the next character, after escaping and ignoring comments
     fn next_char(&mut self) -> Result<Option<char>> {
         match self.iter.next() {
@@ -62,8 +67,8 @@ impl<'s> GmxLexer<'s> {
                 Some(_) => len += 1,
             };
         }
-
-        Ok(&word[0..len])
+        word = self.expand_macros(&word[0..len]);
+        Ok(word)
     }
 
     fn lex_define_macro(&mut self) -> <Self as Iterator>::Item {
@@ -144,7 +149,9 @@ impl<'s> GmxLexer<'s> {
             };
         }
 
-        let name = name.ok_or("No name in header title")?;
+        let name = name
+            .map(|s| self.expand_macros(s))
+            .ok_or("No name in header title")?;
         Ok(Token::Directive(name))
     }
 
@@ -152,25 +159,17 @@ impl<'s> GmxLexer<'s> {
     fn lex_data(&mut self) -> <Self as Iterator>::Item {
         let mut fields = Vec::with_capacity(20);
 
-        let mut this_field_slice = self.iter.as_str();
-        let mut this_field_length = 0;
         loop {
-            match self.next_char()? {
-                None => break,
-                Some('\n') => break,
-                Some(c) if c.is_whitespace() => {
-                    if this_field_length > 0 {
-                        fields.push(&this_field_slice[0..this_field_length]);
-                        this_field_length = 0;
+            match self.next_word() {
+                Ok(s) => fields.push(s),
+                Err((s, "EOF")) | Err((s, "EOL")) => {
+                    if s != "" {
+                        fields.push(s);
                     }
-                    this_field_slice = self.iter.as_str();
+                    break;
                 }
-                Some(_) => this_field_length += 1,
+                Err((_, e)) => return Err(e),
             }
-        }
-
-        if this_field_length > 0 {
-            fields.push(&this_field_slice[0..this_field_length]);
         }
 
         Ok(Token::DataLine(fields))
