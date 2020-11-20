@@ -170,6 +170,7 @@ impl<'s> GmxLexer<'s> {
     fn lex_macro(&mut self) -> <Self as Iterator>::Item {
         match self.next_word() {
             Ok("define") => self.lex_define_macro(),
+            Ok("include") => Err("#include macros are unimplemented"),
             Ok("undef") => Err("#undef macros are unimplemented"),
             Ok("ifdef") => Err("#ifdef macros are unimplemented"),
             Ok("if") => Err("#if macros are unimplemented"),
