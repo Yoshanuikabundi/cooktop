@@ -1,17 +1,37 @@
+use std::collections::{HashMap, VecDeque};
+
 type Result<T, E = &'static str> = std::result::Result<T, E>;
 
 #[allow(single_use_lifetimes)]
 #[derive(Debug, PartialEq)]
 pub enum Token<'s> {
-    ObjectMacro { name: &'s str, def: &'s str },
     Directive(&'s str),
     DataLine(Vec<&'s str>),
+    /// Macro tokens can be ignored by the parser as expansion happens at lex time
+    ObjectMacro {
+        name: &'s str,
+        def: &'s str,
+    },
+}
+
+impl Token<'_> {
+    pub fn is_macro(&self) -> bool {
+        match self {
+            Self::ObjectMacro { .. } => true,
+            Self::Directive(_) => false,
+            Self::DataLine(_) => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct GmxLexer<'s> {
     iter: std::str::Chars<'s>,
     yielded_err: bool,
+    macros: HashMap<&'s str, &'s str>,
+    current_expansion: VecDeque<&'s str>,
+    expansion_is_eof: bool,
+    expansion_is_eol: bool,
 }
 
 impl<'s> GmxLexer<'s> {
@@ -20,12 +40,21 @@ impl<'s> GmxLexer<'s> {
         GmxLexer {
             iter: input.chars(),
             yielded_err: false,
+            macros: HashMap::with_capacity(20),
+            current_expansion: VecDeque::with_capacity(20),
+            expansion_is_eol: false,
+            expansion_is_eof: false,
         }
     }
 
-    fn expand_macros(&self, input: &'s str) -> &'s str {
-        // todo!()
-        input
+    fn expand_macros(&mut self, input: &'s str) {
+        for word in input.split_whitespace() {
+            if let Some(&expanded) = self.macros.get(word) {
+                self.expand_macros(expanded);
+            } else if word != "" {
+                self.current_expansion.push_back(word);
+            }
+        }
     }
 
     /// Give the next character, after escaping and ignoring comments
@@ -54,7 +83,9 @@ impl<'s> GmxLexer<'s> {
     /// Consume leading whitespace, yield a word, then consume a single whitespace character
     ///
     /// Words are composed of any number of non-whitespace characters. EOL or EOF is an error.
-    fn next_word(&mut self) -> Result<&'s str, (&'s str, &'static str)> {
+    fn next_word_no_expand(&mut self) -> Result<&'s str, (&'s str, &'static str)> {
+        assert!(self.current_expansion.is_empty());
+
         let mut word = self.iter.as_str();
         let mut len = 0;
 
@@ -67,12 +98,49 @@ impl<'s> GmxLexer<'s> {
                 Some(_) => len += 1,
             };
         }
-        word = self.expand_macros(&word[0..len]);
-        Ok(word)
+
+        Ok(&word[0..len])
+    }
+
+    /// Consume leading whitespace, expand macros, yield a word, then consume a single whitespace character
+    ///
+    /// Words are composed of any number of non-whitespace characters. EOL or EOF is an error.
+    fn next_word(&mut self) -> Result<&'s str, (&'s str, &'static str)> {
+        while self.current_expansion.is_empty() {
+            match self.next_word_no_expand() {
+                Ok(word) => self.expand_macros(word),
+                Err((word, "EOL")) => {
+                    self.expansion_is_eol = true;
+                    self.expand_macros(word);
+                    break;
+                }
+                Err((word, "EOF")) => {
+                    self.expansion_is_eof = true;
+                    self.expand_macros(word);
+                    break;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        let word = self.current_expansion.pop_front().unwrap_or("");
+
+        if self.current_expansion.is_empty() {
+            if self.expansion_is_eof {
+                Err((word, "EOF"))
+            } else if self.expansion_is_eol {
+                self.expansion_is_eol = false;
+                Err((word, "EOL"))
+            } else {
+                Ok(word)
+            }
+        } else {
+            Ok(word)
+        }
     }
 
     fn lex_define_macro(&mut self) -> <Self as Iterator>::Item {
-        let name = match self.next_word() {
+        let name = match self.next_word_no_expand() {
             Ok(s) if s.contains("(") || s.contains(")") => {
                 return Err("Function-like macros not supported")
             }
@@ -91,11 +159,11 @@ impl<'s> GmxLexer<'s> {
                 Some(_) => len += 1,
             }
         }
+        def = &def[0..len];
 
-        Ok(Token::ObjectMacro {
-            name,
-            def: &def[0..len],
-        })
+        self.macros.insert(name, def);
+
+        Ok(Token::ObjectMacro { name, def })
     }
 
     // Lex a macro
@@ -117,42 +185,40 @@ impl<'s> GmxLexer<'s> {
 
     /// Lex a directive
     fn lex_directive(&mut self) -> <Self as Iterator>::Item {
-        let mut slice = self.iter.as_str();
-        let mut name = None;
-        let mut len = 0;
+        let name = match self.next_word() {
+            Err((s, "EOF")) | Err((s, "EOL")) if s.ends_with(']') => {
+                return Ok(Token::Directive(&s[0..s.len() - 1]))
+            }
+            Ok(s) => s,
+            Err((_, "EOF")) => {
+                return Err("Unexpected end of file while lexing a directive header")
+            }
+            Err((_, "EOL")) => {
+                return Err("Unexpected end of line while lexing a directive header")
+            }
+            Err((_, e)) => return Err(e),
+        };
 
-        loop {
-            match self.next_char()? {
-                Some('\n') => return Err("Unexpected newline while lexing a directive"),
-                Some(']') => {
-                    if name.is_none() && len > 0 {
-                        name = Some(&slice[0..len]);
-                    }
-                    break;
+        // Now we need to make sure that the line ends appropriately - with a ] if there hasn't
+        // been one already, and otherwise with only whitespace
+        let expected = if name.ends_with("]") { "" } else { "]" };
+
+        match self.next_word() {
+            Ok(s) if s == expected => match self.next_word() {
+                Err(("", "EOF")) | Err(("", "EOL")) => Ok(Token::Directive(name)),
+                Ok(_) | Err((_, "EOF")) | Err((_, "EOL")) => {
+                    Err("Unexpected character after directive header")
                 }
-                Some(c) if c.is_whitespace() && len == 0 => slice = self.iter.as_str(),
-                Some(c) if c.is_whitespace() && name.is_none() => name = Some(&slice[0..len]),
-                Some(c) if c.is_whitespace() => continue,
-                Some(_) if name.is_none() => len += 1,
-                Some(_) => return Err("Non-whitespace character after directive name"),
-                None => return Err("Unexpected EOF while lexing a directive"),
-            };
+                Err((_, e)) => Err(e),
+            },
+            Ok(_) => Err("Unexpected character in directive header"),
+            Err((s, "EOF")) | Err((s, "EOL")) if s == expected => Ok(Token::Directive(name)),
+            Err((_, "EOF")) => Err("Unexpected end of file while lexing a directive header"),
+            Err((_, "EOL")) => {
+                return Err("Unexpected end of line while lexing a directive header")
+            }
+            Err((_, e)) => Err(e),
         }
-
-        // TODO: Check if there should always be a newline after a directive header
-        loop {
-            match self.next_char()? {
-                None => break,
-                Some('\n') => break,
-                Some(c) if c.is_whitespace() => continue,
-                Some(_) => return Err("Unexpected character on directive header line"),
-            };
-        }
-
-        let name = name
-            .map(|s| self.expand_macros(s))
-            .ok_or("No name in header title")?;
-        Ok(Token::Directive(name))
     }
 
     /// Lex a line of data
@@ -220,7 +286,7 @@ mod tests {
         loop {
             let result = lexer.next_word().clone();
             output.push(result);
-            if result.map_err(|(_, e)| e) == Err("EOF") {
+            if let Err((_, "EOF")) = result {
                 break;
             }
         }
@@ -253,6 +319,50 @@ mod tests {
     }
 
     #[test]
+    fn test_expand_macros() {
+        let input = "
+            #define POSRES position_restraints
+            [ POSRES ]
+        ";
+        let output: Result<Vec<Token<'static>>, _> = GmxLexer::new(input)
+            .filter(|r| if let Ok(t) = r { !t.is_macro() } else { true })
+            .collect();
+        #[rustfmt::skip]
+        let expected = Ok(vec![
+            Token::Directive("position_restraints"),
+        ]);
+        assert_eq!(output, expected);
+
+        let input = "
+            #define POSRES position_restraints
+            #define POSRESFC 10000
+            #define POSRESFC3 10000 10000 10000
+            #define POSRESFC2 POSRESFC POSRESFC
+
+            [ POSRES ]
+            0  POSRESFC POSRESFC POSRESFC
+            1  POSRESFC3  ; Keep the trailing whitespace
+            2  POSRESFC2 POSRESFC
+            #define POSRESFC 5000
+            3  POSRESFC2 POSRESFC
+            4  10000 10000 10000
+        ";
+        let output: Result<Vec<Token<'static>>, _> = GmxLexer::new(input)
+            .filter(|r| if let Ok(t) = r { !t.is_macro() } else { true })
+            .collect();
+        #[rustfmt::skip]
+        let expected = Ok(vec![
+            Token::Directive("position_restraints"),
+            Token::DataLine(vec!["0", "10000", "10000", "10000"]),
+            Token::DataLine(vec!["1", "10000", "10000", "10000"]),
+            Token::DataLine(vec!["2", "10000", "10000", "10000"]),
+            Token::DataLine(vec!["3", "5000", "5000", "5000"]),
+            Token::DataLine(vec!["4", "10000", "10000", "10000"]),
+        ]);
+        assert_eq!(output, expected);
+    }
+
+    #[test]
     fn test_lex_comment() {
         let input = "; Comments are ignored by the lexer";
         let output: Result<Vec<Token<'static>>, _> = GmxLexer::new(input).collect();
@@ -274,17 +384,22 @@ mod tests {
 
         let input = "[ defa ults ]";
         let output: Result<Vec<Token<'static>>, _> = GmxLexer::new(input).collect();
-        let expected = Err("Non-whitespace character after directive name");
+        let expected = Err("Unexpected character in directive header");
         assert_eq!(output, expected);
 
         let input = "[ defaults \n ]";
         let output: Result<Vec<Token<'static>>, _> = GmxLexer::new(input).collect();
-        let expected = Err("Unexpected newline while lexing a directive");
+        let expected = Err("Unexpected end of line while lexing a directive header");
         assert_eq!(output, expected);
 
         let input = "[ defaults ] hello!";
         let output: Result<Vec<Token<'static>>, _> = GmxLexer::new(input).collect();
-        let expected = Err("Unexpected character on directive header line");
+        let expected = Err("Unexpected character after directive header");
+        assert_eq!(output, expected);
+
+        let input = "[ defaults hello! ] ";
+        let output: Result<Vec<Token<'static>>, _> = GmxLexer::new(input).collect();
+        let expected = Err("Unexpected character in directive header");
         assert_eq!(output, expected);
     }
 
