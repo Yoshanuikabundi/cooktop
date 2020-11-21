@@ -1,5 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::mem;
+use std::path::{Path, PathBuf};
 
 type Result<T, E = &'static str> = std::result::Result<T, E>;
 
@@ -54,6 +55,7 @@ impl PartialEq<str> for Chars<'_> {
     }
 }
 
+/// A lexer for GROMACS topologies
 #[allow(single_use_lifetimes)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct GmxLexer<'s> {
@@ -64,6 +66,7 @@ pub struct GmxLexer<'s> {
     expansion_is_eof: bool,
     expansion_is_eol: bool,
     current_include: Option<Box<Self>>,
+    include_paths: Vec<PathBuf>,
 }
 
 impl<'s> GmxLexer<'s> {
@@ -74,6 +77,15 @@ impl<'s> GmxLexer<'s> {
 
     /// Create a new lexer from a GROMACS topology as a str, with some predefined macros
     pub fn with_macros(input: &'s str, macros: HashMap<&'s str, &'s str>) -> Self {
+        Self::with_macros_and_include(input, macros, Vec::with_capacity(20))
+    }
+
+    /// Create a new lexer from a GROMACS topology as a str, with some predefined macros
+    pub fn with_macros_and_include(
+        input: &'s str,
+        macros: HashMap<&'s str, &'s str>,
+        include_paths: Vec<PathBuf>,
+    ) -> Self {
         GmxLexer {
             iter: Chars(input.chars()),
             yielded_err: false,
@@ -82,7 +94,20 @@ impl<'s> GmxLexer<'s> {
             expansion_is_eol: false,
             expansion_is_eof: false,
             current_include: None,
+            include_paths,
         }
+    }
+
+    /// Define a macro for the lexer
+    pub fn add_macro(mut self, key: &'s str, value: &'s str) -> Self {
+        self.macros.insert(key, value);
+        self
+    }
+
+    /// Define a macro for the lexer
+    pub fn add_include_path(mut self, path: impl AsRef<Path>) -> Self {
+        self.include_paths.push(PathBuf::from(path.as_ref()));
+        self
     }
 
     fn expand_macros(&mut self, input: &'s str) {
@@ -205,38 +230,75 @@ impl<'s> GmxLexer<'s> {
     }
 
     fn lex_include_macro(&mut self) -> <Self as Iterator>::Item {
+        let mut gobble_whitespace = true;
         let path = match self.next_word_no_expand() {
+            Ok(s) if s.starts_with("\"") && s.ends_with("\"") => &s[1..s.len() - 1],
+            Ok(s) if s.starts_with("\"") => {
+                return Err("whitespace-containing quoted paths are not supported")
+            }
             Ok(s) => s,
             Err(("", e)) if e == "EOF" => return Err("Unexpected EOF in #include declaration"),
             Err(("", e)) if e == "EOL" => return Err("Unexpected EOL in #include declaration"),
-            Err((s, e)) if e == "EOF" || e == "EOL" => s,
+            Err((s, e))
+                if (e == "EOF" || e == "EOL") && s.starts_with("\"") && s.ends_with("\"") =>
+            {
+                gobble_whitespace = false;
+                &s[1..s.len() - 1]
+            }
+            Err((s, e)) if (e == "EOF" || e == "EOL") && s.starts_with("\"") => {
+                return Err("whitespace-containing quoted paths are not supported");
+            }
+            Err((s, e)) if e == "EOF" || e == "EOL" => {
+                gobble_whitespace = false;
+                s
+            }
             Err((_, e)) => return Err(e),
         };
 
-        match self.next_word_no_expand() {
-            Ok("") => Ok(()),
-            Err(("", e)) if e == "EOF" || e == "EOL" => Ok(()),
-            Ok(_) => Err("Unexpected character after #include declaration"),
-            Err((_, e)) if e == "EOF" || e == "EOL" => {
-                Err("Unexpected character after #include declaration")
-            }
-            Err((_, e)) => Err(e),
-        }?;
+        if gobble_whitespace {
+            match self.next_word_no_expand() {
+                Ok("") => Ok(()),
+                Err(("", e)) if e == "EOF" || e == "EOL" => Ok(()),
+                Ok(_) => Err("Unexpected character after #include declaration"),
+                Err((_, e)) if e == "EOF" || e == "EOL" => {
+                    Err("Unexpected character after #include declaration")
+                }
+                Err((_, e)) => Err(e),
+            }?;
+        }
 
         // Read the path and leak the text to produce an allocated 'static str
         // We'll hold onto a pointer to it so we can deallocate it in unsafe code
         // in a wrapper function that reads the topology file, lexes and parses it,
         // and then cleans up
         // TODO: Figure out how to use Pin rather than a leak
-        let mut text = String::new();
         use std::io::Read as _;
-        std::fs::File::open(path)
-            .map_err(|_| "Error opening #include file")?
+        let mut text = String::new();
+        let mut file = std::fs::File::open(path);
+        let mut path_used = PathBuf::from(".");
+        for include_path in &self.include_paths {
+            if file.is_ok() {
+                break;
+            }
+            let mut include_path = include_path.to_path_buf();
+            include_path.push(path);
+            if let &Some(p) = &include_path.parent() {
+                path_used = p.to_owned()
+            }
+            file = std::fs::File::open(&include_path);
+        }
+
+        file.map_err(|_| "Error opening #include file")?
             .read_to_string(&mut text)
             .map_err(|_| "Error reading #include file")?;
         let text: &'s str = Box::leak(text.into_boxed_str());
 
-        let tokens = GmxLexer::with_macros(text, self.macros.clone());
+        let tokens = GmxLexer::with_macros_and_include(
+            text,
+            self.macros.clone(),
+            self.include_paths.clone(),
+        )
+        .add_include_path(path_used);
 
         Ok(Token::IncludeMacro { text, tokens })
     }
@@ -469,6 +531,7 @@ mod tests {
             expansion_is_eof: false,
             expansion_is_eol: false,
             current_include: Some(Box::new(included)),
+            include_paths: Vec::with_capacity(5),
         };
 
         let output: Result<Vec<Token<'static>>, _> = outer.collect();
