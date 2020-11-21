@@ -1,49 +1,87 @@
 use std::collections::{HashMap, VecDeque};
+use std::mem;
 
 type Result<T, E = &'static str> = std::result::Result<T, E>;
 
+/// Macro tokens can be ignored by the parser as expansion happens at lex time
 #[allow(single_use_lifetimes)]
 #[derive(Debug, PartialEq)]
 pub enum Token<'s> {
     Directive(&'s str),
     DataLine(Vec<&'s str>),
-    /// Macro tokens can be ignored by the parser as expansion happens at lex time
-    ObjectMacro {
-        name: &'s str,
-        def: &'s str,
-    },
+    ObjectMacro { name: &'s str, def: &'s str },
+    IncludeMacro { text: &'s str, tokens: GmxLexer<'s> },
 }
 
 impl Token<'_> {
     pub fn is_macro(&self) -> bool {
         match self {
             Self::ObjectMacro { .. } => true,
+            Self::IncludeMacro { .. } => true,
             Self::Directive(_) => false,
             Self::DataLine(_) => false,
         }
     }
 }
 
+/// Newtype around std::str::Chars to implement PartialEq
 #[derive(Debug, Clone)]
+struct Chars<'s>(std::str::Chars<'s>);
+
+impl<'s> Chars<'s> {
+    fn as_str(&self) -> &'s str {
+        self.0.as_str()
+    }
+}
+
+impl<'s> Iterator for Chars<'s> {
+    type Item = <std::str::Chars<'s> as Iterator>::Item;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next()
+    }
+}
+
+impl PartialEq for Chars<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl PartialEq<str> for Chars<'_> {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
+#[allow(single_use_lifetimes)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GmxLexer<'s> {
-    iter: std::str::Chars<'s>,
+    iter: Chars<'s>,
     yielded_err: bool,
     macros: HashMap<&'s str, &'s str>,
     current_expansion: VecDeque<&'s str>,
     expansion_is_eof: bool,
     expansion_is_eol: bool,
+    current_include: Option<Box<Self>>,
 }
 
 impl<'s> GmxLexer<'s> {
     /// Create a new lexer from a GROMACS topology as a str
     pub fn new(input: &'s str) -> Self {
+        Self::with_macros(input, HashMap::with_capacity(20))
+    }
+
+    /// Create a new lexer from a GROMACS topology as a str, with some predefined macros
+    pub fn with_macros(input: &'s str, macros: HashMap<&'s str, &'s str>) -> Self {
         GmxLexer {
-            iter: input.chars(),
+            iter: Chars(input.chars()),
             yielded_err: false,
-            macros: HashMap::with_capacity(20),
+            macros,
             current_expansion: VecDeque::with_capacity(20),
             expansion_is_eol: false,
             expansion_is_eof: false,
+            current_include: None,
         }
     }
 
@@ -166,11 +204,48 @@ impl<'s> GmxLexer<'s> {
         Ok(Token::ObjectMacro { name, def })
     }
 
+    fn lex_include_macro(&mut self) -> <Self as Iterator>::Item {
+        let path = match self.next_word_no_expand() {
+            Ok(s) => s,
+            Err(("", e)) if e == "EOF" => return Err("Unexpected EOF in #include declaration"),
+            Err(("", e)) if e == "EOL" => return Err("Unexpected EOL in #include declaration"),
+            Err((s, e)) if e == "EOF" || e == "EOL" => s,
+            Err((_, e)) => return Err(e),
+        };
+
+        match self.next_word_no_expand() {
+            Ok("") => Ok(()),
+            Err(("", e)) if e == "EOF" || e == "EOL" => Ok(()),
+            Ok(_) => Err("Unexpected character after #include declaration"),
+            Err((_, e)) if e == "EOF" || e == "EOL" => {
+                Err("Unexpected character after #include declaration")
+            }
+            Err((_, e)) => Err(e),
+        }?;
+
+        // Read the path and leak the text to produce an allocated 'static str
+        // We'll hold onto a pointer to it so we can deallocate it in unsafe code
+        // in a wrapper function that reads the topology file, lexes and parses it,
+        // and then cleans up
+        // TODO: Figure out how to use Pin rather than a leak
+        let mut text = String::new();
+        use std::io::Read as _;
+        std::fs::File::open(path)
+            .map_err(|_| "Error opening #include file")?
+            .read_to_string(&mut text)
+            .map_err(|_| "Error reading #include file")?;
+        let text: &'s str = Box::leak(text.into_boxed_str());
+
+        let tokens = GmxLexer::with_macros(text, self.macros.clone());
+
+        Ok(Token::IncludeMacro { text, tokens })
+    }
+
     // Lex a macro
     fn lex_macro(&mut self) -> <Self as Iterator>::Item {
         match self.next_word() {
             Ok("define") => self.lex_define_macro(),
-            Ok("include") => Err("#include macros are unimplemented"),
+            Ok("include") => self.lex_include_macro(),
             Ok("undef") => Err("#undef macros are unimplemented"),
             Ok("ifdef") => Err("#ifdef macros are unimplemented"),
             Ok("if") => Err("#if macros are unimplemented"),
@@ -241,17 +316,8 @@ impl<'s> GmxLexer<'s> {
 
         Ok(Token::DataLine(fields))
     }
-}
 
-impl<'s> Iterator for GmxLexer<'s> {
-    type Item = Result<Token<'s>>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        // If last time yielded an error, we're done
-        if self.yielded_err {
-            return None;
-        }
-
+    fn next_token(&mut self) -> Option<<Self as Iterator>::Item> {
         //Match the first character of the next token to decide what to do next
         let prev_iter = self.iter.clone();
         match self.next_char() {
@@ -267,10 +333,55 @@ impl<'s> Iterator for GmxLexer<'s> {
                 }
                 None => None,
             },
-            Err(e) => {
+            Err(e) => Some(Err(e)),
+        }
+    }
+
+    /// Consume the lexer, returning an error if one occurred or otherwise returning self
+    pub fn lex_all(mut self) -> Result<Self> {
+        loop {
+            match self.next() {
+                Some(Ok(_)) => continue,
+                Some(Err(e)) => return Err(e),
+                None => break,
+            }
+        }
+        Ok(self)
+    }
+}
+
+impl<'s> Iterator for GmxLexer<'s> {
+    type Item = Result<Token<'s>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // If last time yielded an error, we're done
+        if self.yielded_err {
+            return None;
+        }
+
+        // Check if we're in the middle of a #include
+        if let Some(lexer) = self.current_include.as_mut() {
+            match lexer.next() {
+                Some(result) => return Some(result),
+                None => {
+                    mem::swap(&mut lexer.macros, &mut self.macros);
+                    self.current_include = None;
+                }
+            }
+        }
+
+        match self.next_token() {
+            Some(Ok(Token::IncludeMacro { tokens, .. })) => {
+                self.current_include = Some(Box::new(tokens));
+                self.next()
+            }
+            Some(Ok(t)) if t.is_macro() => self.next(),
+            Some(Ok(t)) => Some(Ok(t)),
+            Some(Err(e)) => {
                 self.yielded_err = true;
                 Some(Err(e))
             }
+            None => None,
         }
     }
 }
@@ -278,6 +389,16 @@ impl<'s> Iterator for GmxLexer<'s> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct RawTokenIter<'s>(GmxLexer<'s>);
+
+    impl<'s> Iterator for RawTokenIter<'s> {
+        type Item = <GmxLexer<'s> as Iterator>::Item;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            self.0.next_token()
+        }
+    }
 
     #[test]
     fn test_next_word() {
@@ -298,7 +419,7 @@ mod tests {
     #[test]
     fn test_lex_define() {
         let input = "#define pos_res_fc 10000";
-        let output: Result<Vec<Token<'static>>, _> = GmxLexer::new(input).collect();
+        let output: Result<Vec<Token<'static>>, _> = RawTokenIter(GmxLexer::new(input)).collect();
         let expected = Ok(vec![Token::ObjectMacro {
             name: "pos_res_fc",
             def: "10000",
@@ -306,12 +427,12 @@ mod tests {
         assert_eq!(output, expected);
 
         let input = "#define pos_res_fc() 10000";
-        let output: Result<Vec<Token<'static>>, _> = GmxLexer::new(input).collect();
+        let output: Result<Vec<Token<'static>>, _> = RawTokenIter(GmxLexer::new(input)).collect();
         let expected = Err("Function-like macros not supported");
         assert_eq!(output, expected);
 
         let input = "#define pos_res_fc  10000 10000    10000 ; this is a comment\n";
-        let output: Result<Vec<Token<'static>>, _> = GmxLexer::new(input).collect();
+        let output: Result<Vec<Token<'static>>, _> = RawTokenIter(GmxLexer::new(input)).collect();
         let expected = Ok(vec![Token::ObjectMacro {
             name: "pos_res_fc",
             def: "10000 10000    10000 ",
@@ -320,14 +441,64 @@ mod tests {
     }
 
     #[test]
+    fn test_lex_included() -> Result<()> {
+        let macros = "
+            #define POSRES position_restraints
+            #define POSRESFC 10000
+            #define POSRESFC3 10000 10000 10000
+            #define POSRESFC2 POSRESFC POSRESFC
+        ";
+        let macros = GmxLexer::new(macros).lex_all()?.macros;
+
+        let input = "
+            [ POSRES ]
+            0  POSRESFC POSRESFC POSRESFC
+            1  POSRESFC3  ; Keep the trailing whitespace
+            2  POSRESFC2 POSRESFC
+            #define POSRESFC 5000
+            3  POSRESFC2 POSRESFC
+            4  10000 10000 10000
+        ";
+        let included = GmxLexer::with_macros(input, macros.clone());
+
+        let outer = GmxLexer {
+            iter: Chars("5 POSRESFC2 POSRESFC".chars()),
+            yielded_err: false,
+            macros: macros.clone(),
+            current_expansion: VecDeque::new(),
+            expansion_is_eof: false,
+            expansion_is_eol: false,
+            current_include: Some(Box::new(included)),
+        };
+
+        let output: Result<Vec<Token<'static>>, _> = outer.collect();
+        let output = output?;
+        #[rustfmt::skip]
+        let expected = vec![
+            Token::Directive("position_restraints"),
+            Token::DataLine(vec!["0", "10000", "10000", "10000"]),
+            Token::DataLine(vec!["1", "10000", "10000", "10000"]),
+            Token::DataLine(vec!["2", "10000", "10000", "10000"]),
+            Token::DataLine(vec!["3", "5000", "5000", "5000"]),
+            Token::DataLine(vec!["4", "10000", "10000", "10000"]),
+            Token::DataLine(vec!["5", "5000", "5000", "5000"]),
+        ];
+
+        assert_eq!(output.len(), expected.len());
+        for (o, e) in output.iter().zip(expected.iter()) {
+            assert_eq!(o, e);
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn test_expand_macros() -> Result<()> {
         let input = "
             #define POSRES position_restraints
             [ POSRES ]
         ";
-        let output: Result<Vec<Token<'static>>, _> = GmxLexer::new(input)
-            .filter(|r| if let Ok(t) = r { !t.is_macro() } else { true })
-            .collect();
+        let output: Result<Vec<Token<'static>>, _> = GmxLexer::new(input).collect();
         #[rustfmt::skip]
         let expected = Ok(vec![
             Token::Directive("position_restraints"),
@@ -348,9 +519,7 @@ mod tests {
             3  POSRESFC2 POSRESFC
             4  10000 10000 10000
         ";
-        let output: Result<Vec<Token<'static>>, _> = GmxLexer::new(input)
-            .filter(|r| if let Ok(t) = r { !t.is_macro() } else { true })
-            .collect();
+        let output: Result<Vec<Token<'static>>, _> = GmxLexer::new(input).collect();
         let output = output?;
         #[rustfmt::skip]
         let expected = vec![
