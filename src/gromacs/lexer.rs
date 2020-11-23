@@ -13,6 +13,8 @@ pub enum Token<'s> {
     ObjectMacro { name: &'s str, def: &'s str },
     IncludeMacro { text: &'s str, tokens: GmxLexer<'s> },
     UndefMacro { name: &'s str },
+    IfdefMacro(bool),
+    EndIfMacro,
 }
 
 impl Token<'_> {
@@ -20,7 +22,9 @@ impl Token<'_> {
         match self {
             Self::ObjectMacro { .. } => true,
             Self::IncludeMacro { .. } => true,
+            Self::IfdefMacro(_) => true,
             Self::UndefMacro { .. } => true,
+            Self::EndIfMacro => true,
             Self::Directive(_) => false,
             Self::DataLine(_) => false,
         }
@@ -69,6 +73,8 @@ pub struct GmxLexer<'s> {
     expansion_is_eol: bool,
     current_include: Option<Box<Self>>,
     include_paths: Vec<PathBuf>,
+    current_if_true_depth: usize,
+    current_if_depth: usize,
 }
 
 impl<'s> GmxLexer<'s> {
@@ -97,6 +103,8 @@ impl<'s> GmxLexer<'s> {
             expansion_is_eof: false,
             current_include: None,
             include_paths,
+            current_if_true_depth: 0,
+            current_if_depth: 0,
         }
     }
 
@@ -205,26 +213,27 @@ impl<'s> GmxLexer<'s> {
     }
 
     fn lex_define_macro(&mut self) -> <Self as Iterator>::Item {
-        let name = match self.next_word_no_expand() {
+        let (name, def) = match self.next_word_no_expand() {
             Ok(s) if s.contains("(") || s.contains(")") => {
                 return Err("Function-like macros not supported")
             }
-            Ok(s) => s,
-            Err((s, e)) if e == "EOF" || e == "EOL" => s,
+            Ok(s) => {
+                let mut def = self.iter.as_str();
+                let mut len = 0;
+                loop {
+                    match self.next_char()? {
+                        None => break,
+                        Some('\n') => break,
+                        Some(c) if c.is_whitespace() && len == 0 => def = self.iter.as_str(),
+                        Some(_) => len += 1,
+                    }
+                }
+                def = &def[0..len];
+                (s, def)
+            }
+            Err((s, e)) if e == "EOF" || e == "EOL" => (s, ""),
             Err((_, e)) => return Err(e),
         };
-
-        let mut def = self.iter.as_str();
-        let mut len = 0;
-        loop {
-            match self.next_char()? {
-                None => break,
-                Some('\n') => break,
-                Some(c) if c.is_whitespace() && len == 0 => def = self.iter.as_str(),
-                Some(_) => len += 1,
-            }
-        }
-        def = &def[0..len];
 
         self.macros.insert(name, def);
 
@@ -254,6 +263,50 @@ impl<'s> GmxLexer<'s> {
         self.macros.remove(name);
 
         Ok(Token::UndefMacro { name })
+    }
+
+    fn lex_ifdef_macro(&mut self) -> <Self as Iterator>::Item {
+        let name = match self.next_word_no_expand() {
+            Ok(s) if s.contains("(") || s.contains(")") => {
+                return Err("Function-like macros not supported")
+            }
+            Ok(s) => loop {
+                match self.next_char()? {
+                    None => break s,
+                    Some('\n') => break s,
+                    Some(c) if c.is_whitespace() => continue,
+                    Some(c) => {
+                        println!("{:?}, {:?}", self.iter.as_str(), c);
+                        return Err("Unexpected character after #undef macro");
+                    }
+                }
+            },
+            Err((s, e)) if e == "EOF" || e == "EOL" => s,
+            Err((_, e)) => return Err(e),
+        };
+
+        if self.macros.contains_key(name) {
+            Ok(Token::IfdefMacro(true))
+        } else {
+            Ok(Token::IfdefMacro(false))
+        }
+    }
+
+    fn lex_endif_macro(&mut self, gobble_whitespace: bool) -> <Self as Iterator>::Item {
+        if gobble_whitespace {
+            loop {
+                match self.next_char()? {
+                    None => break,
+                    Some('\n') => break,
+                    Some(c) if c.is_whitespace() => continue,
+                    Some(c) => {
+                        println!("{:?}, {:?}", self.iter.as_str(), c);
+                        return Err("Unexpected character after #endif macro");
+                    }
+                }
+            }
+        }
+        Ok(Token::EndIfMacro)
     }
 
     fn lex_include_macro(&mut self) -> <Self as Iterator>::Item {
@@ -336,11 +389,14 @@ impl<'s> GmxLexer<'s> {
             Ok("define") => self.lex_define_macro(),
             Ok("include") => self.lex_include_macro(),
             Ok("undef") => self.lex_undef_macro(),
-            Ok("ifdef") => Err("#ifdef macros are unimplemented"),
+            Ok("ifdef") => self.lex_ifdef_macro(),
             Ok("if") => Err("#if macros are unimplemented"),
-            Ok("else") => Err("#else macros are unimplemented"),
+            Ok("else") | Err(("else", "EOL")) | Err(("else", "EOF")) => {
+                Err("#else macros are unimplemented")
+            }
             Ok("elif") => Err("#elif macros are unimplemented"),
-            Ok("endif") => Err("#endif macros are unimplemented"),
+            Ok("endif") => self.lex_endif_macro(true),
+            Err(("endif", "EOL")) | Err(("endif", "EOF")) => self.lex_endif_macro(false),
             Ok(_) => Err("Unknown macro declaration"),
             Err((_, "EOF")) => Err("End of file in middle of macro definition"),
             Err((_, "EOL")) => Err("End of line in middle of macro definition"),
@@ -437,6 +493,10 @@ impl<'s> GmxLexer<'s> {
         }
         Ok(self)
     }
+
+    fn current_if(&self) -> bool {
+        self.current_if_depth == self.current_if_true_depth
+    }
 }
 
 impl<'s> Iterator for GmxLexer<'s> {
@@ -459,18 +519,55 @@ impl<'s> Iterator for GmxLexer<'s> {
             }
         }
 
-        match self.next_token() {
-            Some(Ok(Token::IncludeMacro { tokens, .. })) => {
-                self.current_include = Some(Box::new(tokens));
-                self.next()
+        if self.current_if() {
+            match self.next_token() {
+                Some(Ok(Token::IncludeMacro { tokens, .. })) => {
+                    self.current_include = Some(Box::new(tokens));
+                    self.next()
+                }
+                Some(Ok(Token::IfdefMacro(true))) => {
+                    self.current_if_depth += 1;
+                    self.current_if_true_depth += 1;
+                    self.next()
+                }
+                Some(Ok(Token::IfdefMacro(false))) => {
+                    self.current_if_depth += 1;
+                    self.next()
+                }
+                Some(Ok(Token::EndIfMacro)) if self.current_if_depth == 0 => {
+                    return Some(Err("Unmatched #endif"));
+                }
+                Some(Ok(Token::EndIfMacro)) => {
+                    self.current_if_depth -= 1;
+                    self.current_if_true_depth -= 1;
+                    self.next()
+                }
+                Some(Ok(t)) if t.is_macro() => self.next(),
+                Some(Ok(t)) => Some(Ok(t)),
+                Some(Err(e)) => {
+                    self.yielded_err = true;
+                    Some(Err(e))
+                }
+                None => None,
             }
-            Some(Ok(t)) if t.is_macro() => self.next(),
-            Some(Ok(t)) => Some(Ok(t)),
-            Some(Err(e)) => {
-                self.yielded_err = true;
-                Some(Err(e))
+        } else {
+            match self.next_token() {
+                Some(Ok(Token::IncludeMacro { .. })) => self.next(),
+                Some(Ok(Token::IfdefMacro(_))) => {
+                    self.current_if_depth += 1;
+                    self.next()
+                }
+                Some(Ok(Token::EndIfMacro)) => {
+                    self.current_if_depth -= 1;
+                    self.next()
+                }
+                Some(Ok(_)) => self.next(),
+                Some(Err(e)) => {
+                    self.yielded_err = true;
+                    Some(Err(e))
+                }
+                None => None,
             }
-            None => None,
         }
     }
 }
@@ -507,26 +604,88 @@ mod tests {
 
     #[test]
     fn test_lex_define() {
-        let input = "#define pos_res_fc 10000";
+        let input = "#define POSRES";
         let output: Result<Vec<Token<'static>>, _> = RawTokenIter(GmxLexer::new(input)).collect();
         let expected = Ok(vec![Token::ObjectMacro {
-            name: "pos_res_fc",
+            name: "POSRES",
+            def: "",
+        }]);
+        assert_eq!(output, expected);
+
+        let input = "#define POSRESFC 10000";
+        let output: Result<Vec<Token<'static>>, _> = RawTokenIter(GmxLexer::new(input)).collect();
+        let expected = Ok(vec![Token::ObjectMacro {
+            name: "POSRESFC",
             def: "10000",
         }]);
         assert_eq!(output, expected);
 
-        let input = "#define pos_res_fc() 10000";
+        let input = "#define POSRESFC() 10000";
         let output: Result<Vec<Token<'static>>, _> = RawTokenIter(GmxLexer::new(input)).collect();
         let expected = Err("Function-like macros not supported");
         assert_eq!(output, expected);
 
-        let input = "#define pos_res_fc  10000 10000    10000 ; this is a comment\n";
+        let input = "#define POSRESFC  10000 10000    10000 ; this is a comment\n";
         let output: Result<Vec<Token<'static>>, _> = RawTokenIter(GmxLexer::new(input)).collect();
         let expected = Ok(vec![Token::ObjectMacro {
-            name: "pos_res_fc",
+            name: "POSRESFC",
             def: "10000 10000    10000 ",
         }]);
         assert_eq!(output, expected);
+
+        let input = "#define POSRES\n#define POSRESFC 10000";
+        let output: Result<Vec<Token<'static>>, _> = RawTokenIter(GmxLexer::new(input)).collect();
+        let expected = Ok(vec![
+            Token::ObjectMacro {
+                name: "POSRES",
+                def: "",
+            },
+            Token::ObjectMacro {
+                name: "POSRESFC",
+                def: "10000",
+            },
+        ]);
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn test_ifdef() -> Result<()> {
+        let input = "
+            #define POSRES
+            #define POSRESFC 10000
+
+            #ifdef POSRES
+            [ position_restraints ]
+            0  POSRESFC POSRESFC POSRESFC
+            2  POSRESFC POSRESFC POSRESFC
+            3  POSRESFC POSRESFC POSRESFC
+            6  POSRESFC POSRESFC POSRESFC
+            8  POSRESFC POSRESFC POSRESFC
+            #ifdef POSRES_LIGHT
+            1  POSRESFC POSRESFC POSRESFC
+            4  POSRESFC POSRESFC POSRESFC
+            5  POSRESFC POSRESFC POSRESFC
+            7  POSRESFC POSRESFC POSRESFC
+            #endif
+            #endif
+        ";
+        let output: Result<Vec<Token<'static>>, _> = GmxLexer::new(input).collect();
+        let output = output?;
+        #[rustfmt::skip]
+        let expected = vec![
+            Token::Directive("position_restraints"),
+            Token::DataLine(vec!["0", "10000", "10000", "10000"]),
+            Token::DataLine(vec!["2", "10000", "10000", "10000"]),
+            Token::DataLine(vec!["3", "10000", "10000", "10000"]),
+            Token::DataLine(vec!["6", "10000", "10000", "10000"]),
+            Token::DataLine(vec!["8", "10000", "10000", "10000"]),
+        ];
+
+        assert_eq!(output.len(), expected.len());
+        for (o, e) in output.iter().zip(expected.iter()) {
+            assert_eq!(o, e);
+        }
+        Ok(())
     }
 
     #[test]
@@ -559,6 +718,8 @@ mod tests {
             expansion_is_eol: false,
             current_include: Some(Box::new(included)),
             include_paths: Vec::with_capacity(5),
+            current_if_true_depth: 0,
+            current_if_depth: 0,
         };
 
         let output: Result<Vec<Token<'static>>, _> = outer.collect();
