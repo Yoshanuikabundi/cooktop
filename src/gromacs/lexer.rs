@@ -610,6 +610,7 @@ mod tests {
             4  10000 10000 10000
             #undef POSRESFC
             5  POSRESFC2 POSRESFC
+            6  POSRESFC3
         ";
         let output: Result<Vec<Token<'static>>, _> = GmxLexer::new(input).collect();
         let output = output?;
@@ -622,6 +623,7 @@ mod tests {
             Token::DataLine(vec!["3", "5000", "5000", "5000"]),
             Token::DataLine(vec!["4", "10000", "10000", "10000"]),
             Token::DataLine(vec!["5", "POSRESFC", "POSRESFC", "POSRESFC"]),
+            Token::DataLine(vec!["6", "10000", "10000", "10000"]),
         ];
 
         assert_eq!(output.len(), expected.len());
