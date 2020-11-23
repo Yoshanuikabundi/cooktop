@@ -12,6 +12,7 @@ pub enum Token<'s> {
     DataLine(Vec<&'s str>),
     ObjectMacro { name: &'s str, def: &'s str },
     IncludeMacro { text: &'s str, tokens: GmxLexer<'s> },
+    UndefMacro { name: &'s str },
 }
 
 impl Token<'_> {
@@ -19,6 +20,7 @@ impl Token<'_> {
         match self {
             Self::ObjectMacro { .. } => true,
             Self::IncludeMacro { .. } => true,
+            Self::UndefMacro { .. } => true,
             Self::Directive(_) => false,
             Self::DataLine(_) => false,
         }
@@ -229,6 +231,31 @@ impl<'s> GmxLexer<'s> {
         Ok(Token::ObjectMacro { name, def })
     }
 
+    fn lex_undef_macro(&mut self) -> <Self as Iterator>::Item {
+        let name = match self.next_word_no_expand() {
+            Ok(s) if s.contains("(") || s.contains(")") => {
+                return Err("Function-like macros not supported")
+            }
+            Ok(s) => loop {
+                match self.next_char()? {
+                    None => break s,
+                    Some('\n') => break s,
+                    Some(c) if c.is_whitespace() => continue,
+                    Some(c) => {
+                        println!("{:?}, {:?}", self.iter.as_str(), c);
+                        return Err("Unexpected character after #undef macro");
+                    }
+                }
+            },
+            Err((s, e)) if e == "EOF" || e == "EOL" => s,
+            Err((_, e)) => return Err(e),
+        };
+
+        self.macros.remove(name);
+
+        Ok(Token::UndefMacro { name })
+    }
+
     fn lex_include_macro(&mut self) -> <Self as Iterator>::Item {
         let mut gobble_whitespace = true;
         let path = match self.next_word_no_expand() {
@@ -308,7 +335,7 @@ impl<'s> GmxLexer<'s> {
         match self.next_word() {
             Ok("define") => self.lex_define_macro(),
             Ok("include") => self.lex_include_macro(),
-            Ok("undef") => Err("#undef macros are unimplemented"),
+            Ok("undef") => self.lex_undef_macro(),
             Ok("ifdef") => Err("#ifdef macros are unimplemented"),
             Ok("if") => Err("#if macros are unimplemented"),
             Ok("else") => Err("#else macros are unimplemented"),
@@ -581,6 +608,8 @@ mod tests {
             #define POSRESFC 5000
             3  POSRESFC2 POSRESFC
             4  10000 10000 10000
+            #undef POSRESFC
+            5  POSRESFC2 POSRESFC
         ";
         let output: Result<Vec<Token<'static>>, _> = GmxLexer::new(input).collect();
         let output = output?;
@@ -592,6 +621,7 @@ mod tests {
             Token::DataLine(vec!["2", "10000", "10000", "10000"]),
             Token::DataLine(vec!["3", "5000", "5000", "5000"]),
             Token::DataLine(vec!["4", "10000", "10000", "10000"]),
+            Token::DataLine(vec!["5", "POSRESFC", "POSRESFC", "POSRESFC"]),
         ];
 
         assert_eq!(output.len(), expected.len());
