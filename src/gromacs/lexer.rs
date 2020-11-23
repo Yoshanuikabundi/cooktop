@@ -15,6 +15,7 @@ pub enum Token<'s> {
     UndefMacro { name: &'s str },
     IfdefMacro(bool),
     EndIfMacro,
+    ElseMacro,
 }
 
 impl Token<'_> {
@@ -24,6 +25,7 @@ impl Token<'_> {
             Self::IncludeMacro { .. } => true,
             Self::IfdefMacro(_) => true,
             Self::UndefMacro { .. } => true,
+            Self::ElseMacro => true,
             Self::EndIfMacro => true,
             Self::Directive(_) => false,
             Self::DataLine(_) => false,
@@ -309,6 +311,23 @@ impl<'s> GmxLexer<'s> {
         Ok(Token::EndIfMacro)
     }
 
+    fn lex_else_macro(&mut self, gobble_whitespace: bool) -> <Self as Iterator>::Item {
+        if gobble_whitespace {
+            loop {
+                match self.next_char()? {
+                    None => break,
+                    Some('\n') => break,
+                    Some(c) if c.is_whitespace() => continue,
+                    Some(c) => {
+                        println!("{:?}, {:?}", self.iter.as_str(), c);
+                        return Err("Unexpected character after #else macro");
+                    }
+                }
+            }
+        }
+        Ok(Token::ElseMacro)
+    }
+
     fn lex_include_macro(&mut self) -> <Self as Iterator>::Item {
         let mut gobble_whitespace = true;
         let path = match self.next_word_no_expand() {
@@ -391,9 +410,8 @@ impl<'s> GmxLexer<'s> {
             Ok("undef") => self.lex_undef_macro(),
             Ok("ifdef") => self.lex_ifdef_macro(),
             Ok("if") => Err("#if macros are unimplemented"),
-            Ok("else") | Err(("else", "EOL")) | Err(("else", "EOF")) => {
-                Err("#else macros are unimplemented")
-            }
+            Ok("else") => self.lex_else_macro(true),
+            Err(("else", "EOL")) | Err(("else", "EOF")) => self.lex_else_macro(false),
             Ok("elif") => Err("#elif macros are unimplemented"),
             Ok("endif") => self.lex_endif_macro(true),
             Err(("endif", "EOL")) | Err(("endif", "EOF")) => self.lex_endif_macro(false),
@@ -519,8 +537,10 @@ impl<'s> Iterator for GmxLexer<'s> {
             }
         }
 
+        let next_token = self.next_token();
+
         if self.current_if() {
-            match self.next_token() {
+            match next_token {
                 Some(Ok(Token::IncludeMacro { tokens, .. })) => {
                     self.current_include = Some(Box::new(tokens));
                     self.next()
@@ -532,6 +552,13 @@ impl<'s> Iterator for GmxLexer<'s> {
                 }
                 Some(Ok(Token::IfdefMacro(false))) => {
                     self.current_if_depth += 1;
+                    self.next()
+                }
+                Some(Ok(Token::ElseMacro)) if self.current_if_depth == 0 => {
+                    return Some(Err("Unmatched #else"));
+                }
+                Some(Ok(Token::ElseMacro)) => {
+                    self.current_if_true_depth -= 1;
                     self.next()
                 }
                 Some(Ok(Token::EndIfMacro)) if self.current_if_depth == 0 => {
@@ -551,7 +578,7 @@ impl<'s> Iterator for GmxLexer<'s> {
                 None => None,
             }
         } else {
-            match self.next_token() {
+            match next_token {
                 Some(Ok(Token::IncludeMacro { .. })) => self.next(),
                 Some(Ok(Token::IfdefMacro(_))) => {
                     self.current_if_depth += 1;
@@ -559,6 +586,12 @@ impl<'s> Iterator for GmxLexer<'s> {
                 }
                 Some(Ok(Token::EndIfMacro)) => {
                     self.current_if_depth -= 1;
+                    self.next()
+                }
+                Some(Ok(Token::ElseMacro))
+                    if self.current_if_true_depth + 1 == self.current_if_depth =>
+                {
+                    self.current_if_true_depth += 1;
                     self.next()
                 }
                 Some(Ok(_)) => self.next(),
@@ -685,6 +718,57 @@ mod tests {
         for (o, e) in output.iter().zip(expected.iter()) {
             assert_eq!(o, e);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn test_else() -> Result<()> {
+        let input = "
+            #define POSRES
+            #define POSRESFC 10000
+
+            #ifdef POSRES
+            [ position_restraints ]
+            0  POSRESFC POSRESFC POSRESFC
+            2  POSRESFC POSRESFC POSRESFC
+            3  POSRESFC POSRESFC POSRESFC
+            6  POSRESFC POSRESFC POSRESFC
+            8  POSRESFC POSRESFC POSRESFC
+            #ifdef POSRES_LIGHT
+            1  POSRESFC POSRESFC POSRESFC
+            4  POSRESFC POSRESFC POSRESFC
+            5  POSRESFC POSRESFC POSRESFC
+            7  POSRESFC POSRESFC POSRESFC
+            #else
+            1  0.000000 0.000000 0.000000
+            4  0.000000 0.000000 0.000000
+            5  0.000000 0.000000 0.000000
+            7  0.000000 0.000000 0.000000
+            #endif
+            9 POSRESFC POSRESFC POSRESFC
+            #endif
+        ";
+        let output: Result<Vec<Token<'static>>, _> = GmxLexer::new(input).collect();
+        let output = output?;
+        #[rustfmt::skip]
+        let expected = vec![
+            Token::Directive("position_restraints"),
+            Token::DataLine(vec!["0", "10000", "10000", "10000"]),
+            Token::DataLine(vec!["2", "10000", "10000", "10000"]),
+            Token::DataLine(vec!["3", "10000", "10000", "10000"]),
+            Token::DataLine(vec!["6", "10000", "10000", "10000"]),
+            Token::DataLine(vec!["8", "10000", "10000", "10000"]),
+            Token::DataLine(vec!["1", "0.000000", "0.000000", "0.000000"]),
+            Token::DataLine(vec!["4", "0.000000", "0.000000", "0.000000"]),
+            Token::DataLine(vec!["5", "0.000000", "0.000000", "0.000000"]),
+            Token::DataLine(vec!["7", "0.000000", "0.000000", "0.000000"]),
+            Token::DataLine(vec!["9", "10000", "10000", "10000"]),
+        ];
+
+        for (o, e) in output.iter().zip(expected.iter()) {
+            assert_eq!(o, e);
+        }
+        assert_eq!(output.len(), expected.len());
         Ok(())
     }
 
