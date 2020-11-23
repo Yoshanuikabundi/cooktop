@@ -708,6 +708,8 @@ mod tests {
     #[test]
     fn test_lex_topology() -> Result<()> {
         let input = r"
+            #define H_MASS 1.008
+
             [ defaults ]
             ; nb   combo  pairs   fudge_lj  fudge_qq
             1       2     yes     0.5  0.8333
@@ -718,7 +720,7 @@ mod tests {
             C            6      12.01    0.0000  A   3.39967e-01  3.59824e-01
             CA           6      12.01    0.0000  A   3.39967e-01  3.59824e-01
             F            9      19.00    0.0000  A   3.11815e-01  2.55224e-01
-            HA           1       1.008   0.0000  A   2.59964e-01  6.27600e-02
+            HA           1      H_MASS   0.0000  A   2.59964e-01  6.27600e-02
             Cl          17      35.45    0.0000  A   4.40104e-01  4.18400e-01
             Na          11      22.99    0.0000  A   3.32840e-01  1.15897e-02
 
