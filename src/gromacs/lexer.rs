@@ -163,13 +163,20 @@ impl<'s> GmxLexer<'s> {
 
         let mut token = self.iter.as_str();
         let mut len = 0;
+        let mut quoted = false;
 
         loop {
             match self.next_char().map_err(|e| ("", e))? {
+                None if quoted => return Err(("", "EOF in middle of quote")),
                 None => return Err((&token[0..len], "EOF")),
-                Some('\n') => return Err((&token[0..len], "EOL")),
-                Some(c) if c.is_whitespace() && len == 0 => token = self.iter.as_str(),
-                Some(c) if c.is_whitespace() => break,
+                Some('\n') if !quoted => return Err((&token[0..len], "EOL")),
+                Some(c) if c.is_whitespace() && !quoted && len == 0 => token = self.iter.as_str(),
+                Some(c) if c.is_whitespace() && !quoted => break,
+                Some('"') if quoted => break,
+                Some('"') => {
+                    token = self.iter.as_str();
+                    quoted = true
+                }
                 Some(_) => len += 1,
             };
         }
@@ -331,22 +338,9 @@ impl<'s> GmxLexer<'s> {
     fn lex_include_macro(&mut self) -> <Self as Iterator>::Item {
         let mut gobble_whitespace = true;
         let path = match self.next_token_no_expand() {
-            Ok(s) if s.starts_with("\"") && s.ends_with("\"") => &s[1..s.len() - 1],
-            Ok(s) if s.starts_with("\"") => {
-                return Err("whitespace-containing quoted paths are not supported")
-            }
             Ok(s) => s,
             Err(("", e)) if e == "EOF" => return Err("Unexpected EOF in #include declaration"),
             Err(("", e)) if e == "EOL" => return Err("Unexpected EOL in #include declaration"),
-            Err((s, e))
-                if (e == "EOF" || e == "EOL") && s.starts_with("\"") && s.ends_with("\"") =>
-            {
-                gobble_whitespace = false;
-                &s[1..s.len() - 1]
-            }
-            Err((s, e)) if (e == "EOF" || e == "EOL") && s.starts_with("\"") => {
-                return Err("whitespace-containing quoted paths are not supported");
-            }
             Err((s, e)) if e == "EOF" || e == "EOL" => {
                 gobble_whitespace = false;
                 s
