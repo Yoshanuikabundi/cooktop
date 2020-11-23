@@ -4,21 +4,21 @@ use std::path::{Path, PathBuf};
 
 type Result<T, E = &'static str> = std::result::Result<T, E>;
 
-/// Macro tokens can be ignored by the parser as expansion happens at lex time
+/// Macro items can be ignored by the parser as expansion happens at lex time
 #[allow(single_use_lifetimes)]
 #[derive(Debug, PartialEq)]
-pub enum Token<'s> {
+pub enum Item<'s> {
     Directive(&'s str),
     DataLine(Vec<&'s str>),
     ObjectMacro { name: &'s str, def: &'s str },
-    IncludeMacro { text: &'s str, tokens: GmxLexer<'s> },
+    IncludeMacro { text: &'s str, items: GmxLexer<'s> },
     UndefMacro { name: &'s str },
     IfdefMacro(bool),
     EndIfMacro,
     ElseMacro,
 }
 
-impl Token<'_> {
+impl Item<'_> {
     pub fn is_macro(&self) -> bool {
         match self {
             Self::ObjectMacro { .. } => true,
@@ -239,7 +239,7 @@ impl<'s> GmxLexer<'s> {
 
         self.macros.insert(name, def);
 
-        Ok(Token::ObjectMacro { name, def })
+        Ok(Item::ObjectMacro { name, def })
     }
 
     fn lex_undef_macro(&mut self) -> <Self as Iterator>::Item {
@@ -264,7 +264,7 @@ impl<'s> GmxLexer<'s> {
 
         self.macros.remove(name);
 
-        Ok(Token::UndefMacro { name })
+        Ok(Item::UndefMacro { name })
     }
 
     fn lex_ifdef_macro(&mut self) -> <Self as Iterator>::Item {
@@ -288,9 +288,9 @@ impl<'s> GmxLexer<'s> {
         };
 
         if self.macros.contains_key(name) {
-            Ok(Token::IfdefMacro(true))
+            Ok(Item::IfdefMacro(true))
         } else {
-            Ok(Token::IfdefMacro(false))
+            Ok(Item::IfdefMacro(false))
         }
     }
 
@@ -308,7 +308,7 @@ impl<'s> GmxLexer<'s> {
                 }
             }
         }
-        Ok(Token::EndIfMacro)
+        Ok(Item::EndIfMacro)
     }
 
     fn lex_else_macro(&mut self, gobble_whitespace: bool) -> <Self as Iterator>::Item {
@@ -325,7 +325,7 @@ impl<'s> GmxLexer<'s> {
                 }
             }
         }
-        Ok(Token::ElseMacro)
+        Ok(Item::ElseMacro)
     }
 
     fn lex_include_macro(&mut self) -> <Self as Iterator>::Item {
@@ -392,14 +392,14 @@ impl<'s> GmxLexer<'s> {
             .map_err(|_| "Error reading #include file")?;
         let text: &'s str = Box::leak(text.into_boxed_str());
 
-        let tokens = GmxLexer::with_macros_and_include(
+        let items = GmxLexer::with_macros_and_include(
             text,
             self.macros.clone(),
             self.include_paths.clone(),
         )
         .add_include_path(path_used);
 
-        Ok(Token::IncludeMacro { text, tokens })
+        Ok(Item::IncludeMacro { text, items })
     }
 
     // Lex a macro
@@ -426,7 +426,7 @@ impl<'s> GmxLexer<'s> {
     fn lex_directive(&mut self) -> <Self as Iterator>::Item {
         let name = match self.next_word() {
             Err((s, "EOF")) | Err((s, "EOL")) if s.ends_with(']') => {
-                return Ok(Token::Directive(&s[0..s.len() - 1]))
+                return Ok(Item::Directive(&s[0..s.len() - 1]))
             }
             Ok(s) => s,
             Err((_, "EOF")) => {
@@ -444,14 +444,14 @@ impl<'s> GmxLexer<'s> {
 
         match self.next_word() {
             Ok(s) if s == expected => match self.next_word() {
-                Err(("", "EOF")) | Err(("", "EOL")) => Ok(Token::Directive(name)),
+                Err(("", "EOF")) | Err(("", "EOL")) => Ok(Item::Directive(name)),
                 Ok(_) | Err((_, "EOF")) | Err((_, "EOL")) => {
                     Err("Unexpected character after directive header")
                 }
                 Err((_, e)) => Err(e),
             },
             Ok(_) => Err("Unexpected character in directive header"),
-            Err((s, "EOF")) | Err((s, "EOL")) if s == expected => Ok(Token::Directive(name)),
+            Err((s, "EOF")) | Err((s, "EOL")) if s == expected => Ok(Item::Directive(name)),
             Err((_, "EOF")) => Err("Unexpected end of file while lexing a directive header"),
             Err((_, "EOL")) => {
                 return Err("Unexpected end of line while lexing a directive header")
@@ -477,11 +477,11 @@ impl<'s> GmxLexer<'s> {
             }
         }
 
-        Ok(Token::DataLine(fields))
+        Ok(Item::DataLine(fields))
     }
 
-    fn next_token(&mut self) -> Option<<Self as Iterator>::Item> {
-        //Match the first character of the next token to decide what to do next
+    fn next_item(&mut self) -> Option<<Self as Iterator>::Item> {
+        //Match the first character of the next item to decide what to do next
         let prev_iter = self.iter.clone();
         match self.next_char() {
             Ok(opt) => match opt {
@@ -518,7 +518,7 @@ impl<'s> GmxLexer<'s> {
 }
 
 impl<'s> Iterator for GmxLexer<'s> {
-    type Item = Result<Token<'s>>;
+    type Item = Result<Item<'s>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         // If last time yielded an error, we're done
@@ -537,34 +537,34 @@ impl<'s> Iterator for GmxLexer<'s> {
             }
         }
 
-        let next_token = self.next_token();
+        let next_item = self.next_item();
 
         if self.current_if() {
-            match next_token {
-                Some(Ok(Token::IncludeMacro { tokens, .. })) => {
-                    self.current_include = Some(Box::new(tokens));
+            match next_item {
+                Some(Ok(Item::IncludeMacro { items, .. })) => {
+                    self.current_include = Some(Box::new(items));
                     self.next()
                 }
-                Some(Ok(Token::IfdefMacro(true))) => {
+                Some(Ok(Item::IfdefMacro(true))) => {
                     self.current_if_depth += 1;
                     self.current_if_true_depth += 1;
                     self.next()
                 }
-                Some(Ok(Token::IfdefMacro(false))) => {
+                Some(Ok(Item::IfdefMacro(false))) => {
                     self.current_if_depth += 1;
                     self.next()
                 }
-                Some(Ok(Token::ElseMacro)) if self.current_if_depth == 0 => {
+                Some(Ok(Item::ElseMacro)) if self.current_if_depth == 0 => {
                     return Some(Err("Unmatched #else"));
                 }
-                Some(Ok(Token::ElseMacro)) => {
+                Some(Ok(Item::ElseMacro)) => {
                     self.current_if_true_depth -= 1;
                     self.next()
                 }
-                Some(Ok(Token::EndIfMacro)) if self.current_if_depth == 0 => {
+                Some(Ok(Item::EndIfMacro)) if self.current_if_depth == 0 => {
                     return Some(Err("Unmatched #endif"));
                 }
-                Some(Ok(Token::EndIfMacro)) => {
+                Some(Ok(Item::EndIfMacro)) => {
                     self.current_if_depth -= 1;
                     self.current_if_true_depth -= 1;
                     self.next()
@@ -578,17 +578,17 @@ impl<'s> Iterator for GmxLexer<'s> {
                 None => None,
             }
         } else {
-            match next_token {
-                Some(Ok(Token::IncludeMacro { .. })) => self.next(),
-                Some(Ok(Token::IfdefMacro(_))) => {
+            match next_item {
+                Some(Ok(Item::IncludeMacro { .. })) => self.next(),
+                Some(Ok(Item::IfdefMacro(_))) => {
                     self.current_if_depth += 1;
                     self.next()
                 }
-                Some(Ok(Token::EndIfMacro)) => {
+                Some(Ok(Item::EndIfMacro)) => {
                     self.current_if_depth -= 1;
                     self.next()
                 }
-                Some(Ok(Token::ElseMacro))
+                Some(Ok(Item::ElseMacro))
                     if self.current_if_true_depth + 1 == self.current_if_depth =>
                 {
                     self.current_if_true_depth += 1;
@@ -609,13 +609,13 @@ impl<'s> Iterator for GmxLexer<'s> {
 mod tests {
     use super::*;
 
-    struct RawTokenIter<'s>(GmxLexer<'s>);
+    struct RawItemIter<'s>(GmxLexer<'s>);
 
-    impl<'s> Iterator for RawTokenIter<'s> {
+    impl<'s> Iterator for RawItemIter<'s> {
         type Item = <GmxLexer<'s> as Iterator>::Item;
 
         fn next(&mut self) -> Option<Self::Item> {
-            self.0.next_token()
+            self.0.next_item()
         }
     }
 
@@ -638,42 +638,42 @@ mod tests {
     #[test]
     fn test_lex_define() {
         let input = "#define POSRES";
-        let output: Result<Vec<Token<'static>>, _> = RawTokenIter(GmxLexer::new(input)).collect();
-        let expected = Ok(vec![Token::ObjectMacro {
+        let output: Result<Vec<Item<'static>>, _> = RawItemIter(GmxLexer::new(input)).collect();
+        let expected = Ok(vec![Item::ObjectMacro {
             name: "POSRES",
             def: "",
         }]);
         assert_eq!(output, expected);
 
         let input = "#define POSRESFC 10000";
-        let output: Result<Vec<Token<'static>>, _> = RawTokenIter(GmxLexer::new(input)).collect();
-        let expected = Ok(vec![Token::ObjectMacro {
+        let output: Result<Vec<Item<'static>>, _> = RawItemIter(GmxLexer::new(input)).collect();
+        let expected = Ok(vec![Item::ObjectMacro {
             name: "POSRESFC",
             def: "10000",
         }]);
         assert_eq!(output, expected);
 
         let input = "#define POSRESFC() 10000";
-        let output: Result<Vec<Token<'static>>, _> = RawTokenIter(GmxLexer::new(input)).collect();
+        let output: Result<Vec<Item<'static>>, _> = RawItemIter(GmxLexer::new(input)).collect();
         let expected = Err("Function-like macros not supported");
         assert_eq!(output, expected);
 
         let input = "#define POSRESFC  10000 10000    10000 ; this is a comment\n";
-        let output: Result<Vec<Token<'static>>, _> = RawTokenIter(GmxLexer::new(input)).collect();
-        let expected = Ok(vec![Token::ObjectMacro {
+        let output: Result<Vec<Item<'static>>, _> = RawItemIter(GmxLexer::new(input)).collect();
+        let expected = Ok(vec![Item::ObjectMacro {
             name: "POSRESFC",
             def: "10000 10000    10000 ",
         }]);
         assert_eq!(output, expected);
 
         let input = "#define POSRES\n#define POSRESFC 10000";
-        let output: Result<Vec<Token<'static>>, _> = RawTokenIter(GmxLexer::new(input)).collect();
+        let output: Result<Vec<Item<'static>>, _> = RawItemIter(GmxLexer::new(input)).collect();
         let expected = Ok(vec![
-            Token::ObjectMacro {
+            Item::ObjectMacro {
                 name: "POSRES",
                 def: "",
             },
-            Token::ObjectMacro {
+            Item::ObjectMacro {
                 name: "POSRESFC",
                 def: "10000",
             },
@@ -702,16 +702,16 @@ mod tests {
             #endif
             #endif
         ";
-        let output: Result<Vec<Token<'static>>, _> = GmxLexer::new(input).collect();
+        let output: Result<Vec<Item<'static>>, _> = GmxLexer::new(input).collect();
         let output = output?;
         #[rustfmt::skip]
         let expected = vec![
-            Token::Directive("position_restraints"),
-            Token::DataLine(vec!["0", "10000", "10000", "10000"]),
-            Token::DataLine(vec!["2", "10000", "10000", "10000"]),
-            Token::DataLine(vec!["3", "10000", "10000", "10000"]),
-            Token::DataLine(vec!["6", "10000", "10000", "10000"]),
-            Token::DataLine(vec!["8", "10000", "10000", "10000"]),
+            Item::Directive("position_restraints"),
+            Item::DataLine(vec!["0", "10000", "10000", "10000"]),
+            Item::DataLine(vec!["2", "10000", "10000", "10000"]),
+            Item::DataLine(vec!["3", "10000", "10000", "10000"]),
+            Item::DataLine(vec!["6", "10000", "10000", "10000"]),
+            Item::DataLine(vec!["8", "10000", "10000", "10000"]),
         ];
 
         assert_eq!(output.len(), expected.len());
@@ -748,21 +748,21 @@ mod tests {
             9 POSRESFC POSRESFC POSRESFC
             #endif
         ";
-        let output: Result<Vec<Token<'static>>, _> = GmxLexer::new(input).collect();
+        let output: Result<Vec<Item<'static>>, _> = GmxLexer::new(input).collect();
         let output = output?;
         #[rustfmt::skip]
         let expected = vec![
-            Token::Directive("position_restraints"),
-            Token::DataLine(vec!["0", "10000", "10000", "10000"]),
-            Token::DataLine(vec!["2", "10000", "10000", "10000"]),
-            Token::DataLine(vec!["3", "10000", "10000", "10000"]),
-            Token::DataLine(vec!["6", "10000", "10000", "10000"]),
-            Token::DataLine(vec!["8", "10000", "10000", "10000"]),
-            Token::DataLine(vec!["1", "0.000000", "0.000000", "0.000000"]),
-            Token::DataLine(vec!["4", "0.000000", "0.000000", "0.000000"]),
-            Token::DataLine(vec!["5", "0.000000", "0.000000", "0.000000"]),
-            Token::DataLine(vec!["7", "0.000000", "0.000000", "0.000000"]),
-            Token::DataLine(vec!["9", "10000", "10000", "10000"]),
+            Item::Directive("position_restraints"),
+            Item::DataLine(vec!["0", "10000", "10000", "10000"]),
+            Item::DataLine(vec!["2", "10000", "10000", "10000"]),
+            Item::DataLine(vec!["3", "10000", "10000", "10000"]),
+            Item::DataLine(vec!["6", "10000", "10000", "10000"]),
+            Item::DataLine(vec!["8", "10000", "10000", "10000"]),
+            Item::DataLine(vec!["1", "0.000000", "0.000000", "0.000000"]),
+            Item::DataLine(vec!["4", "0.000000", "0.000000", "0.000000"]),
+            Item::DataLine(vec!["5", "0.000000", "0.000000", "0.000000"]),
+            Item::DataLine(vec!["7", "0.000000", "0.000000", "0.000000"]),
+            Item::DataLine(vec!["9", "10000", "10000", "10000"]),
         ];
 
         for (o, e) in output.iter().zip(expected.iter()) {
@@ -806,17 +806,17 @@ mod tests {
             current_if_depth: 0,
         };
 
-        let output: Result<Vec<Token<'static>>, _> = outer.collect();
+        let output: Result<Vec<Item<'static>>, _> = outer.collect();
         let output = output?;
         #[rustfmt::skip]
         let expected = vec![
-            Token::Directive("position_restraints"),
-            Token::DataLine(vec!["0", "10000", "10000", "10000"]),
-            Token::DataLine(vec!["1", "10000", "10000", "10000"]),
-            Token::DataLine(vec!["2", "10000", "10000", "10000"]),
-            Token::DataLine(vec!["3", "5000", "5000", "5000"]),
-            Token::DataLine(vec!["4", "10000", "10000", "10000"]),
-            Token::DataLine(vec!["5", "5000", "5000", "5000"]),
+            Item::Directive("position_restraints"),
+            Item::DataLine(vec!["0", "10000", "10000", "10000"]),
+            Item::DataLine(vec!["1", "10000", "10000", "10000"]),
+            Item::DataLine(vec!["2", "10000", "10000", "10000"]),
+            Item::DataLine(vec!["3", "5000", "5000", "5000"]),
+            Item::DataLine(vec!["4", "10000", "10000", "10000"]),
+            Item::DataLine(vec!["5", "5000", "5000", "5000"]),
         ];
 
         assert_eq!(output.len(), expected.len());
@@ -833,10 +833,10 @@ mod tests {
             #define POSRES position_restraints
             [ POSRES ]
         ";
-        let output: Result<Vec<Token<'static>>, _> = GmxLexer::new(input).collect();
+        let output: Result<Vec<Item<'static>>, _> = GmxLexer::new(input).collect();
         #[rustfmt::skip]
         let expected = Ok(vec![
-            Token::Directive("position_restraints"),
+            Item::Directive("position_restraints"),
         ]);
         assert_eq!(output, expected);
 
@@ -857,18 +857,18 @@ mod tests {
             5  POSRESFC2 POSRESFC
             6  POSRESFC3
         ";
-        let output: Result<Vec<Token<'static>>, _> = GmxLexer::new(input).collect();
+        let output: Result<Vec<Item<'static>>, _> = GmxLexer::new(input).collect();
         let output = output?;
         #[rustfmt::skip]
         let expected = vec![
-            Token::Directive("position_restraints"),
-            Token::DataLine(vec!["0", "10000", "10000", "10000"]),
-            Token::DataLine(vec!["1", "10000", "10000", "10000"]),
-            Token::DataLine(vec!["2", "10000", "10000", "10000"]),
-            Token::DataLine(vec!["3", "5000", "5000", "5000"]),
-            Token::DataLine(vec!["4", "10000", "10000", "10000"]),
-            Token::DataLine(vec!["5", "POSRESFC", "POSRESFC", "POSRESFC"]),
-            Token::DataLine(vec!["6", "10000", "10000", "10000"]),
+            Item::Directive("position_restraints"),
+            Item::DataLine(vec!["0", "10000", "10000", "10000"]),
+            Item::DataLine(vec!["1", "10000", "10000", "10000"]),
+            Item::DataLine(vec!["2", "10000", "10000", "10000"]),
+            Item::DataLine(vec!["3", "5000", "5000", "5000"]),
+            Item::DataLine(vec!["4", "10000", "10000", "10000"]),
+            Item::DataLine(vec!["5", "POSRESFC", "POSRESFC", "POSRESFC"]),
+            Item::DataLine(vec!["6", "10000", "10000", "10000"]),
         ];
 
         assert_eq!(output.len(), expected.len());
@@ -881,7 +881,7 @@ mod tests {
     #[test]
     fn test_lex_comment() {
         let input = "; Comments are ignored by the lexer";
-        let output: Result<Vec<Token<'static>>, _> = GmxLexer::new(input).collect();
+        let output: Result<Vec<Item<'static>>, _> = GmxLexer::new(input).collect();
         let expected = Ok(vec![]);
         assert_eq!(output, expected);
     }
@@ -889,32 +889,32 @@ mod tests {
     #[test]
     fn test_lex_directive() {
         let input = "[ defaults ]";
-        let output: Result<Vec<Token<'static>>, _> = GmxLexer::new(input).collect();
-        let expected = Ok(vec![Token::Directive("defaults")]);
+        let output: Result<Vec<Item<'static>>, _> = GmxLexer::new(input).collect();
+        let expected = Ok(vec![Item::Directive("defaults")]);
         assert_eq!(output, expected);
 
         let input = "[position_restraints]";
-        let output: Result<Vec<Token<'static>>, _> = GmxLexer::new(input).collect();
-        let expected = Ok(vec![Token::Directive("position_restraints")]);
+        let output: Result<Vec<Item<'static>>, _> = GmxLexer::new(input).collect();
+        let expected = Ok(vec![Item::Directive("position_restraints")]);
         assert_eq!(output, expected);
 
         let input = "[ defa ults ]";
-        let output: Result<Vec<Token<'static>>, _> = GmxLexer::new(input).collect();
+        let output: Result<Vec<Item<'static>>, _> = GmxLexer::new(input).collect();
         let expected = Err("Unexpected character in directive header");
         assert_eq!(output, expected);
 
         let input = "[ defaults \n ]";
-        let output: Result<Vec<Token<'static>>, _> = GmxLexer::new(input).collect();
+        let output: Result<Vec<Item<'static>>, _> = GmxLexer::new(input).collect();
         let expected = Err("Unexpected end of line while lexing a directive header");
         assert_eq!(output, expected);
 
         let input = "[ defaults ] hello!";
-        let output: Result<Vec<Token<'static>>, _> = GmxLexer::new(input).collect();
+        let output: Result<Vec<Item<'static>>, _> = GmxLexer::new(input).collect();
         let expected = Err("Unexpected character after directive header");
         assert_eq!(output, expected);
 
         let input = "[ defaults hello! ] ";
-        let output: Result<Vec<Token<'static>>, _> = GmxLexer::new(input).collect();
+        let output: Result<Vec<Item<'static>>, _> = GmxLexer::new(input).collect();
         let expected = Err("Unexpected character in directive header");
         assert_eq!(output, expected);
     }
@@ -930,17 +930,17 @@ mod tests {
             Cl          17      35.45    0.0000  A   4.40104e-01  4.18400e-01
             Na          11      22.99    0.0000  A   3.32840e-01  1.15897e-02
         ";
-        let output: Result<Vec<Token<'static>>> = GmxLexer::new(input).collect();
+        let output: Result<Vec<Item<'static>>> = GmxLexer::new(input).collect();
         let output = output?;
         #[rustfmt::skip]
         let expected = vec![
-            Token::DataLine(vec!["Br", "35", "79.90", "0.0000", "A", "0.00000e+00", "0.00000e+00"]),
-            Token::DataLine(vec![ "C",  "6", "12.01", "0.0000", "A", "3.39967e-01", "3.59824e-01"]),
-            Token::DataLine(vec!["CA",  "6", "12.01", "0.0000", "A", "3.39967e-01", "3.59824e-01"]),
-            Token::DataLine(vec![ "F",  "9", "19.00", "0.0000", "A", "3.11815e-01", "2.55224e-01"]),
-            Token::DataLine(vec!["HA",  "1", "1.008", "0.0000", "A", "2.59964e-01", "6.27600e-02"]),
-            Token::DataLine(vec!["Cl", "17", "35.45", "0.0000", "A", "4.40104e-01", "4.18400e-01"]),
-            Token::DataLine(vec!["Na", "11", "22.99", "0.0000", "A", "3.32840e-01", "1.15897e-02"]),
+            Item::DataLine(vec!["Br", "35", "79.90", "0.0000", "A", "0.00000e+00", "0.00000e+00"]),
+            Item::DataLine(vec![ "C",  "6", "12.01", "0.0000", "A", "3.39967e-01", "3.59824e-01"]),
+            Item::DataLine(vec!["CA",  "6", "12.01", "0.0000", "A", "3.39967e-01", "3.59824e-01"]),
+            Item::DataLine(vec![ "F",  "9", "19.00", "0.0000", "A", "3.11815e-01", "2.55224e-01"]),
+            Item::DataLine(vec!["HA",  "1", "1.008", "0.0000", "A", "2.59964e-01", "6.27600e-02"]),
+            Item::DataLine(vec!["Cl", "17", "35.45", "0.0000", "A", "4.40104e-01", "4.18400e-01"]),
+            Item::DataLine(vec!["Na", "11", "22.99", "0.0000", "A", "3.32840e-01", "1.15897e-02"]),
         ];
 
         assert_eq!(output.len(), expected.len());
@@ -992,25 +992,25 @@ mod tests {
 
         #[rustfmt::skip]
         let expected = vec![
-            Token::Directive("defaults"),
-            Token::DataLine(vec!["1", "2", "yes", "0.5", "0.8333"]),
-            Token::Directive("atomtypes"),
-            Token::DataLine(vec!["Br", "35", "79.90", "0.0000", "A", "0.00000e+00", "0.00000e+00"]),
-            Token::DataLine(vec![ "C",  "6", "12.01", "0.0000", "A", "3.39967e-01", "3.59824e-01"]),
-            Token::DataLine(vec!["CA",  "6", "12.01", "0.0000", "A", "3.39967e-01", "3.59824e-01"]),
-            Token::DataLine(vec![ "F",  "9", "19.00", "0.0000", "A", "3.11815e-01", "2.55224e-01"]),
-            Token::DataLine(vec!["HA",  "1", "1.008", "0.0000", "A", "2.59964e-01", "6.27600e-02"]),
-            Token::DataLine(vec!["Cl", "17", "35.45", "0.0000", "A", "4.40104e-01", "4.18400e-01"]),
-            Token::DataLine(vec!["Na", "11", "22.99", "0.0000", "A", "3.32840e-01", "1.15897e-02"]),
-            Token::Directive("bondtypes"),
-            Token::DataLine(vec!["Br", "CA", "1", "0.18900", "143929.6"]),
-            Token::DataLine(vec![ "C",  "C", "1", "0.15250", "259408.0"]),
-            Token::DataLine(vec![ "C", "CA", "1", "0.14090", "392459.2"]),
-            Token::DataLine(vec![ "F", "CA", "1", "0.13590", "323004.8"]),
-            Token::DataLine(vec!["CA", "HA", "1", "0.10800", "307105.6"]),
-            Token::DataLine(vec!["Cl", "CA", "1", "0.17270", "161502.4"]),
-            Token::Directive("cmaptypes"),
-            Token::DataLine(vec![
+            Item::Directive("defaults"),
+            Item::DataLine(vec!["1", "2", "yes", "0.5", "0.8333"]),
+            Item::Directive("atomtypes"),
+            Item::DataLine(vec!["Br", "35", "79.90", "0.0000", "A", "0.00000e+00", "0.00000e+00"]),
+            Item::DataLine(vec![ "C",  "6", "12.01", "0.0000", "A", "3.39967e-01", "3.59824e-01"]),
+            Item::DataLine(vec!["CA",  "6", "12.01", "0.0000", "A", "3.39967e-01", "3.59824e-01"]),
+            Item::DataLine(vec![ "F",  "9", "19.00", "0.0000", "A", "3.11815e-01", "2.55224e-01"]),
+            Item::DataLine(vec!["HA",  "1", "1.008", "0.0000", "A", "2.59964e-01", "6.27600e-02"]),
+            Item::DataLine(vec!["Cl", "17", "35.45", "0.0000", "A", "4.40104e-01", "4.18400e-01"]),
+            Item::DataLine(vec!["Na", "11", "22.99", "0.0000", "A", "3.32840e-01", "1.15897e-02"]),
+            Item::Directive("bondtypes"),
+            Item::DataLine(vec!["Br", "CA", "1", "0.18900", "143929.6"]),
+            Item::DataLine(vec![ "C",  "C", "1", "0.15250", "259408.0"]),
+            Item::DataLine(vec![ "C", "CA", "1", "0.14090", "392459.2"]),
+            Item::DataLine(vec![ "F", "CA", "1", "0.13590", "323004.8"]),
+            Item::DataLine(vec!["CA", "HA", "1", "0.10800", "307105.6"]),
+            Item::DataLine(vec!["Cl", "CA", "1", "0.17270", "161502.4"]),
+            Item::Directive("cmaptypes"),
+            Item::DataLine(vec![
                 "C", "NH1", "CT1", "C", "NH1", "1", "5", "5",
                 "0.53048936",  "3.21624080", "4.06375184", "5.23405848", "8.87430584",
                 "4.18872792", "-9.20697568", "-20.19897128", "-20.17293425", "-20.55692503",
