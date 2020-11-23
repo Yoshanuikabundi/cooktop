@@ -155,67 +155,67 @@ impl<'s> GmxLexer<'s> {
         }
     }
 
-    /// Consume leading whitespace, yield a word, then consume a single whitespace character
+    /// Consume leading whitespace, yield a token, then consume a single whitespace character
     ///
     /// Words are composed of any number of non-whitespace characters. EOL or EOF is an error.
-    fn next_word_no_expand(&mut self) -> Result<&'s str, (&'s str, &'static str)> {
+    fn next_token_no_expand(&mut self) -> Result<&'s str, (&'s str, &'static str)> {
         assert!(self.current_expansion.is_empty());
 
-        let mut word = self.iter.as_str();
+        let mut token = self.iter.as_str();
         let mut len = 0;
 
         loop {
             match self.next_char().map_err(|e| ("", e))? {
-                None => return Err((&word[0..len], "EOF")),
-                Some('\n') => return Err((&word[0..len], "EOL")),
-                Some(c) if c.is_whitespace() && len == 0 => word = self.iter.as_str(),
+                None => return Err((&token[0..len], "EOF")),
+                Some('\n') => return Err((&token[0..len], "EOL")),
+                Some(c) if c.is_whitespace() && len == 0 => token = self.iter.as_str(),
                 Some(c) if c.is_whitespace() => break,
                 Some(_) => len += 1,
             };
         }
 
-        Ok(&word[0..len])
+        Ok(&token[0..len])
     }
 
-    /// Consume leading whitespace, expand macros, yield a word, then consume a single whitespace character
+    /// Consume leading whitespace, expand macros, yield a token, then consume a single whitespace character
     ///
     /// Words are composed of any number of non-whitespace characters. EOL or EOF is an error.
-    fn next_word(&mut self) -> Result<&'s str, (&'s str, &'static str)> {
+    fn next_token(&mut self) -> Result<&'s str, (&'s str, &'static str)> {
         while self.current_expansion.is_empty() {
-            match self.next_word_no_expand() {
-                Ok(word) => self.expand_macros(word),
-                Err((word, "EOL")) => {
+            match self.next_token_no_expand() {
+                Ok(token) => self.expand_macros(token),
+                Err((token, "EOL")) => {
                     self.expansion_is_eol = true;
-                    self.expand_macros(word);
+                    self.expand_macros(token);
                     break;
                 }
-                Err((word, "EOF")) => {
+                Err((token, "EOF")) => {
                     self.expansion_is_eof = true;
-                    self.expand_macros(word);
+                    self.expand_macros(token);
                     break;
                 }
                 Err(e) => return Err(e),
             }
         }
 
-        let word = self.current_expansion.pop_front().unwrap_or("");
+        let token = self.current_expansion.pop_front().unwrap_or("");
 
         if self.current_expansion.is_empty() {
             if self.expansion_is_eof {
-                Err((word, "EOF"))
+                Err((token, "EOF"))
             } else if self.expansion_is_eol {
                 self.expansion_is_eol = false;
-                Err((word, "EOL"))
+                Err((token, "EOL"))
             } else {
-                Ok(word)
+                Ok(token)
             }
         } else {
-            Ok(word)
+            Ok(token)
         }
     }
 
     fn lex_define_macro(&mut self) -> <Self as Iterator>::Item {
-        let (name, def) = match self.next_word_no_expand() {
+        let (name, def) = match self.next_token_no_expand() {
             Ok(s) if s.contains("(") || s.contains(")") => {
                 return Err("Function-like macros not supported")
             }
@@ -243,7 +243,7 @@ impl<'s> GmxLexer<'s> {
     }
 
     fn lex_undef_macro(&mut self) -> <Self as Iterator>::Item {
-        let name = match self.next_word_no_expand() {
+        let name = match self.next_token_no_expand() {
             Ok(s) if s.contains("(") || s.contains(")") => {
                 return Err("Function-like macros not supported")
             }
@@ -268,7 +268,7 @@ impl<'s> GmxLexer<'s> {
     }
 
     fn lex_ifdef_macro(&mut self) -> <Self as Iterator>::Item {
-        let name = match self.next_word_no_expand() {
+        let name = match self.next_token_no_expand() {
             Ok(s) if s.contains("(") || s.contains(")") => {
                 return Err("Function-like macros not supported")
             }
@@ -330,7 +330,7 @@ impl<'s> GmxLexer<'s> {
 
     fn lex_include_macro(&mut self) -> <Self as Iterator>::Item {
         let mut gobble_whitespace = true;
-        let path = match self.next_word_no_expand() {
+        let path = match self.next_token_no_expand() {
             Ok(s) if s.starts_with("\"") && s.ends_with("\"") => &s[1..s.len() - 1],
             Ok(s) if s.starts_with("\"") => {
                 return Err("whitespace-containing quoted paths are not supported")
@@ -355,7 +355,7 @@ impl<'s> GmxLexer<'s> {
         };
 
         if gobble_whitespace {
-            match self.next_word_no_expand() {
+            match self.next_token_no_expand() {
                 Ok("") => Ok(()),
                 Err(("", e)) if e == "EOF" || e == "EOL" => Ok(()),
                 Ok(_) => Err("Unexpected character after #include declaration"),
@@ -404,7 +404,7 @@ impl<'s> GmxLexer<'s> {
 
     // Lex a macro
     fn lex_macro(&mut self) -> <Self as Iterator>::Item {
-        match self.next_word() {
+        match self.next_token() {
             Ok("define") => self.lex_define_macro(),
             Ok("include") => self.lex_include_macro(),
             Ok("undef") => self.lex_undef_macro(),
@@ -424,7 +424,7 @@ impl<'s> GmxLexer<'s> {
 
     /// Lex a directive
     fn lex_directive(&mut self) -> <Self as Iterator>::Item {
-        let name = match self.next_word() {
+        let name = match self.next_token() {
             Err((s, "EOF")) | Err((s, "EOL")) if s.ends_with(']') => {
                 return Ok(Item::Directive(&s[0..s.len() - 1]))
             }
@@ -442,8 +442,8 @@ impl<'s> GmxLexer<'s> {
         // been one already, and otherwise with only whitespace
         let expected = if name.ends_with("]") { "" } else { "]" };
 
-        match self.next_word() {
-            Ok(s) if s == expected => match self.next_word() {
+        match self.next_token() {
+            Ok(s) if s == expected => match self.next_token() {
                 Err(("", "EOF")) | Err(("", "EOL")) => Ok(Item::Directive(name)),
                 Ok(_) | Err((_, "EOF")) | Err((_, "EOL")) => {
                     Err("Unexpected character after directive header")
@@ -465,7 +465,7 @@ impl<'s> GmxLexer<'s> {
         let mut fields = Vec::with_capacity(20);
 
         loop {
-            match self.next_word() {
+            match self.next_token() {
                 Ok(s) => fields.push(s),
                 Err((s, "EOF")) | Err((s, "EOL")) => {
                     if s != "" {
@@ -620,12 +620,12 @@ mod tests {
     }
 
     #[test]
-    fn test_next_word() {
+    fn test_next_token() {
         let input = "hello there buddy";
         let mut lexer = GmxLexer::new(input);
         let mut output = Vec::with_capacity(20);
         loop {
-            let result = lexer.next_word().clone();
+            let result = lexer.next_token().clone();
             output.push(result);
             if let Err((_, "EOF")) = result {
                 break;
