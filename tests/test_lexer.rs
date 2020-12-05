@@ -15,7 +15,7 @@ fn c22_top_lexes() -> Result<(), std::io::Error> {
         .lex_all();
 
     match lexed {
-        Ok(_) => (),
+        Ok((_lexer, vec)) => println!("{:?}", vec),
         Err(e) => panic!(e),
     }
 

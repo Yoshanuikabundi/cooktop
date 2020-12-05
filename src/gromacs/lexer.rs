@@ -64,7 +64,6 @@ impl PartialEq<str> for Chars<'_> {
 }
 
 /// A lexer for GROMACS topologies
-#[allow(single_use_lifetimes)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct GmxLexer<'s> {
     iter: Chars<'s>,
@@ -494,16 +493,17 @@ impl<'s> GmxLexer<'s> {
         }
     }
 
-    /// Consume the lexer, returning an error if one occurred or otherwise returning self
-    pub fn lex_all(mut self) -> Result<Self> {
+    /// Consume the lexer, returning an error if one occurred or otherwise returning a big ol vec
+    pub fn lex_all(mut self) -> Result<(Self, Vec<Item<'s>>)> {
+        let mut vec = Vec::new();
         loop {
             match self.next() {
-                Some(Ok(_)) => continue,
+                Some(Ok(v)) => vec.push(v),
                 Some(Err(e)) => return Err(e),
                 None => break,
             }
         }
-        Ok(self)
+        Ok((self, vec))
     }
 
     fn current_if(&self) -> bool {
@@ -774,7 +774,7 @@ mod tests {
             #define POSRESFC3 10000 10000 10000
             #define POSRESFC2 POSRESFC POSRESFC
         ";
-        let macros = GmxLexer::new(macros).lex_all()?.macros;
+        let macros = GmxLexer::new(macros).lex_all()?.0.macros;
 
         let input = "
             [ POSRES ]
